@@ -1,29 +1,30 @@
 """
 Auth manager for Basecamp MCP server.
-Handles token refresh logic automatically.
+Handles token refresh logic automatically. Supports optional user_id for multi-user mode.
 """
 
 import logging
-import os
 import token_storage
 from basecamp_oauth import BasecampOAuth
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-def ensure_authenticated():
+def ensure_authenticated(user_id=None):
     """
     Checks if the current token is valid and refreshes it if necessary.
+    When user_id is set, operates on that user's token (multi-user); otherwise legacy single-user.
+
     Returns:
         bool: True if authenticated (or successfully refreshed), False otherwise.
     """
-    token_data = token_storage.get_token()
+    token_data = token_storage.get_token(user_id=user_id)
     
     if not token_data or not token_data.get('access_token'):
         logger.error("No token data found. Initial authentication required.")
         return False
 
-    if not token_storage.is_token_expired():
+    if not token_storage.is_token_expired(user_id=user_id):
         logger.debug("Token is still valid.")
         return True
 
@@ -39,20 +40,17 @@ def ensure_authenticated():
         oauth = BasecampOAuth()
         new_token_data = oauth.refresh_token(refresh_token)
         
-        # Basecamp refresh response usually contains access_token, expires_in.
-        # It may or may not contain a new refresh_token.
         new_access_token = new_token_data.get('access_token')
         new_refresh_token = new_token_data.get('refresh_token') or refresh_token
         expires_in = new_token_data.get('expires_in')
-        
-        # Maintain the account_id we already had
         account_id = token_data.get('account_id')
 
         token_storage.store_token(
             access_token=new_access_token,
             refresh_token=new_refresh_token,
             expires_in=expires_in,
-            account_id=account_id
+            account_id=account_id,
+            user_id=user_id,
         )
         
         logger.info("Successfully refreshed and stored new tokens.")

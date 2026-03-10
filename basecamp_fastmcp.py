@@ -21,6 +21,12 @@ import token_storage
 import auth_manager
 from dotenv import load_dotenv
 
+# Multi-user: when running over SSE, run_mcp_server_sse sets request-scoped user_id
+try:
+    import mcp_auth_context
+except ImportError:
+    mcp_auth_context = None
+
 # Determine project root (directory containing this script)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DOTENV_PATH = os.path.join(PROJECT_ROOT, '.env')
@@ -41,35 +47,37 @@ logger = logging.getLogger('basecamp_fastmcp')
 # Initialize FastMCP server
 mcp = FastMCP("basecamp")
 
-# Auth helper functions (reused from original server)
+# Auth helper functions (multi-user aware when run over SSE)
+def _get_request_user_id() -> Optional[str]:
+    """Return request-scoped user_id when running over SSE; None for stdio or single-user."""
+    if mcp_auth_context is not None:
+        return mcp_auth_context.get_user_id_for_request()
+    return None
+
 def _get_basecamp_client() -> Optional[BasecampClient]:
-    """Get authenticated Basecamp client (sync version from original server)."""
+    """Get authenticated Basecamp client. Uses per-user token when user_id is set (SSE)."""
     try:
-        token_data = token_storage.get_token()
-        logger.debug(f"Token data retrieved: {token_data}")
+        user_id = _get_request_user_id()
+        token_data = token_storage.get_token(user_id=user_id)
+        logger.debug("Token data retrieved for user_id=%s", user_id)
 
         if not token_data or not token_data.get('access_token'):
             logger.error("No OAuth token available")
             return None
 
-        # Check and automatically refresh if token is expired
-        if not auth_manager.ensure_authenticated():
+        if not auth_manager.ensure_authenticated(user_id=user_id):
             logger.error("OAuth token has expired and automatic refresh failed")
             return None
 
-        # Get fresh token data after potential refresh
-        token_data = token_storage.get_token()
-
-        # Get account_id from token data first, then fall back to env var
+        token_data = token_storage.get_token(user_id=user_id)
         account_id = token_data.get('account_id') or os.getenv('BASECAMP_ACCOUNT_ID')
         user_agent = os.getenv('USER_AGENT') or "Basecamp MCP Server (cursor@example.com)"
 
         if not account_id:
-            logger.error(f"Missing account_id. Token data: {token_data}, Env BASECAMP_ACCOUNT_ID: {os.getenv('BASECAMP_ACCOUNT_ID')}")
+            logger.error("Missing account_id. Token data: %s, Env BASECAMP_ACCOUNT_ID: %s", token_data, os.getenv('BASECAMP_ACCOUNT_ID'))
             return None
 
-        logger.debug(f"Creating Basecamp client with account_id: {account_id}, user_agent: {user_agent}")
-
+        logger.debug("Creating Basecamp client with account_id: %s, user_agent: %s", account_id, user_agent)
         return BasecampClient(
             access_token=token_data['access_token'],
             account_id=account_id,
@@ -77,21 +85,21 @@ def _get_basecamp_client() -> Optional[BasecampClient]:
             auth_mode='oauth'
         )
     except Exception as e:
-        logger.error(f"Error creating Basecamp client: {e}")
+        logger.error("Error creating Basecamp client: %s", e)
         return None
 
 def _get_auth_error_response() -> Dict[str, Any]:
-    """Return consistent auth error response."""
-    if token_storage.is_token_expired():
+    """Return consistent auth error response (uses request user_id when in SSE mode)."""
+    user_id = _get_request_user_id()
+    if token_storage.is_token_expired(user_id=user_id):
         return {
             "error": "OAuth token expired",
-            "message": "Your Basecamp OAuth token has expired. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."
+            "message": "Your Basecamp OAuth token has expired. Please re-authenticate by visiting the OAuth app and completing the flow again."
         }
-    else:
-        return {
-            "error": "Authentication required", 
-            "message": "Please authenticate with Basecamp first. Visit http://localhost:8000 to log in."
-        }
+    return {
+        "error": "Authentication required",
+        "message": "Please authenticate with Basecamp first (visit the OAuth app to link your account and get an API key)."
+    }
 
 async def _run_sync(func, *args, **kwargs):
     """Wrapper to run synchronous functions in thread pool."""

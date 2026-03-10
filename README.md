@@ -356,6 +356,56 @@ The project uses the **official Anthropic FastMCP framework** for maximum reliab
    - `generate_codex_config.py` - For Codex CLI integration
    - `generate_claude_desktop_config.py` - For Claude Desktop integration
 
+## Hosting the MCP server (SSE) & Multi-user
+
+You can run the MCP server over **SSE (Server-Sent Events)** so it is reachable via HTTP (e.g. on a remote host or in Docker). This mode supports **multiple users**, each with their own Basecamp link and API key.
+
+### Environment variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCP_HOST` | Bind address for the SSE server | `0.0.0.0` |
+| `MCP_PORT` | Port for the SSE server | `8010` |
+| `MCP_REQUIRE_AUTH` | If `1`, `true`, or `yes`, require `Authorization: Bearer <api_key>` on every request | unset (single-user fallback allowed) |
+| `MCP_SSE_URL` | Public URL of the SSE server (shown to users after linking Basecamp) | `http://localhost:8010` |
+| `DATA_DIR` | Directory for SQLite DB (created under project root as `data/` if not set) | `./data` |
+
+User and token data are stored in **`data/basecamp_mcp.db`** (SQLite). Create this directory or set `DATA_DIR` if you run from a different working directory.
+
+### API key flow (multi-user)
+
+1. **Run the OAuth app** (e.g. `python oauth_app.py`) and the SSE server (e.g. `python run_mcp_server_sse.py`).
+2. **Visit the OAuth app** in a browser (e.g. `http://localhost:8000` or your deployed URL).
+3. Click **“Sign up with Basecamp”** (or the link to connect Basecamp), complete the Basecamp OAuth flow.
+4. On success you get a **personal API key** and an **MCP config** snippet. Copy the API key (it is not shown again) and use it as `Authorization: Bearer <api_key>` when connecting to the SSE server.
+5. **Configure your MCP client** with the SSE URL and header:
+   - **URL:** `http://<host>:<port>/` (e.g. `http://localhost:8010/` or `https://your-domain.com/`)
+   - **Header:** `Authorization: Bearer <your_api_key>`
+
+Example Cursor config for SSE (multi-user):
+
+```json
+{
+  "mcpServers": {
+    "basecamp": {
+      "url": "http://localhost:8010/",
+      "headers": { "Authorization": "Bearer YOUR_API_KEY" }
+    }
+  }
+}
+```
+
+For **remote hosting** (e.g. Coolify, Docker, or a VPS), set `MCP_SSE_URL` to the public URL (e.g. `https://mcp.yourdomain.com`) so the success page shows the correct URL. On localhost, the default `http://localhost:8010` is fine.
+
+### Auth behavior
+
+- **Single user, no auth:** If only one user exists and `MCP_REQUIRE_AUTH` is not set, requests without an `Authorization` header are allowed (that user’s token is used).
+- **Multiple users or `MCP_REQUIRE_AUTH=1`:** Every request must include `Authorization: Bearer <api_key>`. Invalid or missing API keys receive **401 Unauthorized**.
+
+### Legacy migration
+
+If **no users** exist but a legacy **`oauth_tokens.json`** file is present, the first run of `run_mcp_server_sse.py` or `oauth_app.py` migrates that token into the multi-user store and creates one user. The new API key is printed to stderr (SSE) or logged (OAuth app). After migration, use that API key for SSE connections.
+
 ## Troubleshooting
 
 ### Common Issues (Both Clients)
@@ -437,9 +487,10 @@ If you don't know your Basecamp account ID:
 
 ## Security Notes
 
-- Keep your `.env` file secure and never commit it to version control
-- The OAuth tokens are stored locally in `oauth_tokens.json`
-- This setup is designed for local development use
+- Keep your `.env` file secure and never commit it to version control.
+- **Stdio (local):** OAuth tokens are stored in `oauth_tokens.json` in the project directory.
+- **SSE (multi-user):** Tokens are stored in `data/basecamp_mcp.db`. Each user has an API key; do not share API keys. Use `MCP_REQUIRE_AUTH=1` when hosting for multiple users or on a shared network.
+- For production SSE hosting, use HTTPS and a secure secret for `FLASK_SECRET_KEY`.
 
 ## License
 

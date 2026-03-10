@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import secrets
+import time
 import logging
 from flask import Flask, request, redirect, url_for, session, render_template_string, jsonify
 from dotenv import load_dotenv
@@ -19,6 +20,7 @@ from basecamp_oauth import BasecampOAuth
 from basecamp_client import BasecampClient
 from search_utils import BasecampSearch
 import token_storage
+import user_store
 
 # Configure logging
 logging.basicConfig(
@@ -104,25 +106,46 @@ RESULTS_TEMPLATE = """
         {% if show_home %}
             <a href="/" class="button">Home</a>
         {% endif %}
+        {% if api_key_success %}
+            <h2>You're connected</h2>
+            <p>Save your API key; it won't be shown again. Use it with the MCP server (SSE) by setting <code>Authorization: Bearer YOUR_API_KEY</code>.</p>
+            <p><strong>API key:</strong> <code>{{ api_key }}</code></p>
+            <p><strong>MCP SSE URL:</strong> <code>{{ sse_url }}</code></p>
+            <pre>{{ mcp_config_json }}</pre>
+        {% endif %}
     </div>
 </body>
 </html>
 """
 
+# Pending OAuth state for multi-user flow (state -> create user on callback). Expire after 600s.
+PENDING_OAUTH = {}
+PENDING_OAUTH_TTL = 600
+
+def _pending_state_valid(state):
+    if not state or state not in PENDING_OAUTH:
+        return False
+    created = PENDING_OAUTH[state].get("created_at", 0)
+    if time.time() - created > PENDING_OAUTH_TTL:
+        del PENDING_OAUTH[state]
+        return False
+    return True
+
 @app.template_filter('tojson')
 def to_json(value, indent=None):
     return json.dumps(value, indent=indent)
 
-def get_oauth_client():
-    """Get a configured OAuth client."""
+def get_oauth_client(redirect_uri=None):
+    """Get a configured OAuth client. Uses request host for redirect_uri when in request context."""
     try:
         client_id = os.getenv('BASECAMP_CLIENT_ID')
         client_secret = os.getenv('BASECAMP_CLIENT_SECRET')
-        redirect_uri = os.getenv('BASECAMP_REDIRECT_URI')
         user_agent = os.getenv('USER_AGENT')
-
-        logger.info("Creating OAuth client with config: %s, %s, %s", client_id, redirect_uri, user_agent)
-
+        if redirect_uri is None and request:
+            redirect_uri = url_for("auth_callback", _external=True)
+        if redirect_uri is None:
+            redirect_uri = os.getenv('BASECAMP_REDIRECT_URI')
+        logger.info("Creating OAuth client with redirect_uri: %s", redirect_uri)
         return BasecampOAuth(
             client_id=client_id,
             client_secret=client_secret,
@@ -186,10 +209,48 @@ def ensure_valid_token():
     logger.info("Token is valid")
     return token_data
 
+@app.route('/signup')
+def signup():
+    """Sign-up page (multi-user): link Basecamp and get an API key."""
+    return render_template_string(
+        RESULTS_TEMPLATE,
+        title="Sign up – Basecamp MCP",
+        message="Link your Basecamp account to get a personal API key for the MCP server.",
+        auth_url=url_for("link_basecamp"),
+    )
+
+@app.route('/link-basecamp')
+def link_basecamp():
+    """Start multi-user OAuth flow: redirect to Basecamp with state; callback creates user and shows API key."""
+    try:
+        state = secrets.token_urlsafe(32)
+        PENDING_OAUTH[state] = {"created_at": time.time()}
+        oauth_client = get_oauth_client()
+        auth_url = oauth_client.get_authorization_url(state=state)
+        return redirect(auth_url)
+    except Exception as e:
+        logger.error("Error starting link-basecamp: %s", str(e))
+        return render_template_string(
+            RESULTS_TEMPLATE,
+            title="Error",
+            message=f"Error setting up OAuth: {str(e)}",
+            show_home=True,
+        )
+
 @app.route('/')
 def home():
-    """Home page."""
-    # Ensure we have a valid token
+    """Home page: offer signup (multi-user) or legacy login."""
+    # Multi-user default: show signup
+    return render_template_string(
+        RESULTS_TEMPLATE,
+        title="Basecamp MCP",
+        message="Connect your Basecamp account to use the MCP server. You'll get an API key to use with Cursor or other MCP clients.",
+        auth_url=url_for("link_basecamp"),
+    )
+
+@app.route('/legacy')
+def legacy_home():
+    """Legacy home: show token status or login (single-user)."""
     token_data = ensure_valid_token()
 
     if token_data and token_data.get('access_token'):
@@ -239,11 +300,12 @@ def home():
 
 @app.route('/auth/callback')
 def auth_callback():
-    """Handle the OAuth callback from Basecamp."""
+    """Handle the OAuth callback from Basecamp. Multi-user: state present -> create user, show API key. Legacy: no state -> store global token."""
     logger.info("OAuth callback called with args: %s", request.args)
 
     code = request.args.get('code')
     error = request.args.get('error')
+    state = request.args.get('state')
 
     if error:
         logger.error("OAuth callback error: %s", error)
@@ -264,17 +326,15 @@ def auth_callback():
         )
 
     try:
-        # Exchange the code for an access token
         oauth_client = get_oauth_client()
         logger.info("Exchanging code for token")
         token_data = oauth_client.exchange_code_for_token(code)
-        logger.info(f"Raw token data from Basecamp exchange: {token_data}")
+        logger.info("Raw token data from Basecamp exchange: %s", token_data)
 
-        # Store the token in our secure storage
         access_token = token_data.get('access_token')
         refresh_token = token_data.get('refresh_token')
         expires_in = token_data.get('expires_in')
-        account_id = os.getenv('BASECAMP_ACCOUNT_ID')
+        account_id = token_data.get('account_id') or os.getenv('BASECAMP_ACCOUNT_ID')
 
         if not access_token:
             logger.error("OAuth exchange: No access token received")
@@ -285,32 +345,81 @@ def auth_callback():
                 show_home=True
             )
 
-        # Try to get identity if account_id is not set
-        if not account_id:
-            try:
-                logger.info("Getting user identity to find account_id")
-                identity = oauth_client.get_identity(access_token)
-                logger.info("Identity response: %s", identity)
+        # Get identity for account_id and email
+        email = None
+        try:
+            logger.info("Getting user identity for account_id and email")
+            identity = oauth_client.get_identity(access_token)
+            if not account_id and identity.get('accounts'):
+                for account in identity['accounts']:
+                    if account.get('product') == 'bc3':
+                        account_id = str(account['id'])
+                        break
+            if not account_id:
+                account_id = os.getenv('BASECAMP_ACCOUNT_ID')
+            ident = identity.get("identity") or {}
+            email = ident.get("email_address") or ident.get("email") or identity.get("email")
+        except Exception as identity_error:
+            logger.error("Error getting identity: %s", identity_error)
+            if not account_id:
+                account_id = os.getenv('BASECAMP_ACCOUNT_ID')
 
-                # Find Basecamp 3 account
-                if identity.get('accounts'):
-                    for account in identity['accounts']:
-                        if account.get('product') == 'bc3':  # Basecamp 3
-                            account_id = account['id']
-                            logger.info("Found account_id: %s", account_id)
-                            break
-            except Exception as identity_error:
-                logger.error("Error getting identity: %s", str(identity_error))
-                # Continue with the flow, but log the error
+        # Multi-user flow: state was set by /link-basecamp
+        if state and _pending_state_valid(state):
+            del PENDING_OAUTH[state]
+            user_id, api_key = user_store.create_user(email=email)
+            stored = token_storage.store_token(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=expires_in,
+                account_id=account_id,
+                user_id=user_id,
+            )
+            if not stored:
+                logger.error("Failed to store token for new user")
+                return render_template_string(
+                    RESULTS_TEMPLATE,
+                    title="Error",
+                    message="Failed to store token. Please try again.",
+                    show_home=True,
+                )
+            sse_url = os.getenv("MCP_SSE_URL", "http://localhost:8010").rstrip("/")
+            mcp_config = {
+                "mcpServers": {
+                    "basecamp": {
+                        "url": sse_url + "/",
+                        "headers": {"Authorization": f"Bearer {api_key}"},
+                    }
+                }
+            }
+            mcp_config_json = json.dumps(mcp_config, indent=2)
+            return render_template_string(
+                RESULTS_TEMPLATE,
+                title="Connected",
+                message="You can now use the MCP server with the details below. Save your API key; it won't be shown again.",
+                api_key_success=True,
+                api_key=api_key,
+                sse_url=sse_url,
+                mcp_config_json=mcp_config_json,
+                show_home=True,
+            )
 
-        logger.info("Storing token with account_id: %s", account_id)
+        if state and not _pending_state_valid(state):
+            return render_template_string(
+                RESULTS_TEMPLATE,
+                title="Link expired",
+                message="This link has expired. Please start again from the home page.",
+                show_home=True,
+            )
+
+        # Legacy: store in file for single-user stdio
+        logger.info("Storing token (legacy) with account_id: %s", account_id)
         stored = token_storage.store_token(
             access_token=access_token,
             refresh_token=refresh_token,
             expires_in=expires_in,
             account_id=account_id
         )
-
         if not stored:
             logger.error("Failed to store token")
             return render_template_string(
@@ -319,17 +428,13 @@ def auth_callback():
                 message="Failed to store token. Please try again.",
                 show_home=True
             )
-
-        # Also keep the access token in session for convenience
         session['access_token'] = access_token
         if refresh_token:
             session['refresh_token'] = refresh_token
         if account_id:
             session['account_id'] = account_id
-
-        logger.info("OAuth flow completed successfully")
-
-        return redirect(url_for('home'))
+        logger.info("OAuth flow completed successfully (legacy)")
+        return redirect(url_for('legacy_home'))
     except Exception as e:
         logger.error("Error in OAuth callback: %s", str(e), exc_info=True)
         return render_template_string(
@@ -435,6 +540,14 @@ def health_check():
         "status": "ok",
         "service": "basecamp-oauth-app"
     })
+
+# One-time migration: legacy oauth_tokens.json -> one user in SQLite (when OAuth app loads)
+try:
+    api_key = user_store.migrate_legacy_tokens_if_needed()
+    if api_key:
+        logger.info("Migrated to multi-user. New API key created for legacy token.")
+except Exception as e:
+    logger.warning("Legacy migration check failed: %s", e)
 
 if __name__ == '__main__':
     try:

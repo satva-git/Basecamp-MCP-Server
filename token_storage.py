@@ -57,21 +57,37 @@ def _write_tokens(tokens):
     except Exception:
         pass  # Ignore if chmod fails (might be on Windows)
 
-def store_token(access_token, refresh_token=None, expires_in=None, account_id=None):
+def store_token(access_token, refresh_token=None, expires_in=None, account_id=None, user_id=None):
     """
     Store OAuth tokens securely.
+    When user_id is set, stores in multi-user store (user_store); otherwise uses legacy file.
 
     Args:
         access_token (str): The OAuth access token
         refresh_token (str, optional): The OAuth refresh token
         expires_in (int, optional): Token expiration time in seconds
         account_id (str, optional): The Basecamp account ID
+        user_id (str, optional): If set, store in user_store for multi-user mode
 
     Returns:
         bool: True if the token was stored successfully
     """
     if not access_token:
         return False  # Don't store empty tokens
+
+    if user_id is not None:
+        try:
+            import user_store
+            return user_store.store_token(
+                user_id=user_id,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=expires_in,
+                account_id=account_id,
+            )
+        except Exception as e:
+            _logger.warning("user_store.store_token failed: %s", e)
+            return False
 
     with _lock:
         tokens = _read_tokens()
@@ -93,24 +109,43 @@ def store_token(access_token, refresh_token=None, expires_in=None, account_id=No
         _write_tokens(tokens)
         return True
 
-def get_token():
+def get_token(user_id=None):
     """
     Get the stored OAuth token.
+    When user_id is set, reads from multi-user store (user_store); otherwise legacy file.
 
     Returns:
         dict: Token information or None if not found
     """
+    if user_id is not None:
+        try:
+            import user_store
+            return user_store.get_token(user_id)
+        except Exception as e:
+            _logger.warning("user_store.get_token failed: %s", e)
+            return None
+
     with _lock:
         tokens = _read_tokens()
         return tokens.get('basecamp')
 
-def is_token_expired():
+def is_token_expired(user_id=None):
     """
     Check if the stored token is expired.
+    When user_id is set, uses token from user_store and user_store.is_token_expired logic.
 
     Returns:
         bool: True if the token is expired or not found
     """
+    if user_id is not None:
+        try:
+            import user_store
+            token_data = user_store.get_token(user_id)
+            return user_store.is_token_expired(token_data)
+        except Exception as e:
+            _logger.warning("user_store token expiry check failed: %s", e)
+            return True
+
     with _lock:
         tokens = _read_tokens()
         token_data = tokens.get('basecamp')
