@@ -622,7 +622,7 @@ def auth_callback():
             mcp_config = {
                 "mcpServers": {
                     "basecamp": {
-                        "url": sse_url + "/",
+                        "url": sse_url + "/sse",
                         "headers": {"Authorization": f"Bearer {api_key}"},
                     }
                 }
