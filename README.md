@@ -233,7 +233,7 @@ ls ~/Library/Logs/Claude/mcp-server-basecamp.log
 
 Once configured, you can use these tools in Cursor:
 
-- `get_projects` - Get all Basecamp projects
+- `get_projects` - Get all Basecamp projects (returns all pages; handles Basecamp pagination transparently)
 - `get_project` - Get details for a specific project
 - `get_todolists` - Get todo lists for a project
 - `get_todolist` - Get a specific todo list by ID
@@ -491,6 +491,19 @@ If you don't know your Basecamp account ID:
 - **Stdio (local):** OAuth tokens are stored in `oauth_tokens.json` in the project directory.
 - **SSE (multi-user):** Tokens are stored in `data/basecamp_mcp.db`. Each user has an API key; do not share API keys. Use `MCP_REQUIRE_AUTH=1` when hosting for multiple users or on a shared network.
 - For production SSE hosting, use HTTPS and a secure secret for `FLASK_SECRET_KEY`.
+
+## Version History
+
+### v1.1.0 (2026-03-11)
+
+- **Fix: `get_projects` now returns all projects** — Previously, only the first page (up to 15 projects) was returned because the Basecamp API paginates list endpoints. The `get_projects()` method in `basecamp_client.py` now iterates through all pages using the `Link` header, matching the existing pagination pattern used by `get_todos()` and other list endpoints.
+
+### v1.0.0
+
+- Initial release with 75 MCP tools for Basecamp 3 integration
+- Support for Cursor, Codex, and Claude Desktop clients
+- OAuth 2.0 and Basic Auth support
+- SSE (Server-Sent Events) mode for multi-user hosting
 
 ## License
 
