@@ -2,7 +2,7 @@
 
 This project provides a **FastMCP-powered** integration for Basecamp 3, allowing AI clients to interact with Basecamp directly through the MCP protocol.
 
-✅ **Migration Complete:** Successfully migrated to official Anthropic FastMCP framework with **100% feature parity** (all 75 tools)
+✅ **Migration Complete:** Successfully migrated to official Anthropic FastMCP framework with **100% feature parity** (all 78 tools)
 🚀 **Ready for Production:** Full protocol compliance with MCP 2025-06-18
 
 ## Quick Setup
@@ -73,7 +73,7 @@ This server works with **Cursor**, **Codex**, and **Claude Desktop**. Choose you
 6. **Verify in Cursor:**
    - Go to Cursor Settings → MCP
    - You should see "basecamp" with a **green checkmark**
-   - Available tools: **75 tools** for complete Basecamp control
+   - Available tools: **78 tools** for complete Basecamp control
 
 ### Test Your Setup
 
@@ -172,7 +172,7 @@ Based on the [official MCP quickstart guide](https://modelcontextprotocol.io/qui
 
 4. **Verify in Claude Desktop:**
    - Look for the "Search and tools" icon (🔍) in the chat interface
-   - You should see "basecamp" listed with all 75 tools available
+   - You should see "basecamp" listed with all 78 tools available
    - Toggle the tools on to enable Basecamp integration
 
 ### Claude Desktop Configuration
@@ -274,6 +274,12 @@ Once configured, you can use these tools in Cursor:
 - `update_document` - Update a document
 - `trash_document` - Move a document to trash
 
+### People Tools
+
+- `get_people` - Get all people in the Basecamp account (handles pagination)
+- `get_project_people` - Get all people with access to a specific project (handles pagination)
+- `search_people` - Search for people by name or email (case-insensitive, partial match) — use this to find person IDs for assigning todos, cards, etc.
+
 ### Todo List Group Tools
 
 - `get_todolist_groups` - Get all groups in a todo list (named sections like "Phase 1", "Backlog")
@@ -340,12 +346,14 @@ Ask Cursor things like:
 - "Show me all steps for this card"
 - "Create a sub-task for this card"
 - "Mark this card step as complete"
+- "Find the person named Zenul in the SatvaSolutions project"
+- "Assign this todo to Zenul"
 
 ## Architecture
 
 The project uses the **official Anthropic FastMCP framework** for maximum reliability and compatibility:
 
-1. **FastMCP Server** (`basecamp_fastmcp.py`) - Official MCP SDK with 75 tools, compatible with Cursor, Codex, and Claude Desktop
+1. **FastMCP Server** (`basecamp_fastmcp.py`) - Official MCP SDK with 78 tools, compatible with Cursor, Codex, and Claude Desktop
 2. **OAuth App** (`oauth_app.py`) - Handles OAuth 2.0 flow with Basecamp  
 3. **Token Storage** (`token_storage.py`) - Securely stores OAuth tokens
 4. **Basecamp Client** (`basecamp_client.py`) - Basecamp API client library
@@ -493,6 +501,11 @@ If you don't know your Basecamp account ID:
 - For production SSE hosting, use HTTPS and a secure secret for `FLASK_SECRET_KEY`.
 
 ## Version History
+
+### v1.2.0 (2026-03-13)
+
+- **New: People tools** — Added `get_people`, `get_project_people`, and `search_people` tools. AI assistants can now look up people by name (partial, case-insensitive) to find their IDs for assigning todos, cards, and other resources. Previously, assigning tasks required knowing numeric person IDs upfront.
+- **Fix: `get_people` pagination** — The existing `get_people()` method only returned the first page of results. Now handles Basecamp pagination to return all people.
 
 ### v1.1.0 (2026-03-11)
 

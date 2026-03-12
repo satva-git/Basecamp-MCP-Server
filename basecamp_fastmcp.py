@@ -2502,7 +2502,93 @@ async def reposition_todolist_group(
         return {"error": "Execution error", "message": str(e)}
 
 
-# 🎉 COMPLETE FastMCP server with ALL tools migrated!
+# People Management
+
+@mcp.tool()
+async def get_people() -> Dict[str, Any]:
+    """Get all people in the Basecamp account.
+
+    Returns a list of all people with their IDs, names, and email addresses.
+    Use this to look up person IDs needed for assigning todos, cards, etc.
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        people = await _run_sync(client.get_people)
+        return {"status": "success", "count": len(people), "data": people}
+    except Exception as e:
+        logger.error(f"Error getting people: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {"error": "OAuth token expired", "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."}
+        return {"error": "Execution error", "message": str(e)}
+
+
+@mcp.tool()
+async def get_project_people(project_id: str) -> Dict[str, Any]:
+    """Get all people who have access to a specific project.
+
+    Use this to find who is on a project before assigning todos or cards.
+    Returns person IDs, names, and email addresses for everyone on the project.
+
+    Args:
+        project_id: The project ID to get people for
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        people = await _run_sync(client.get_project_people, project_id)
+        return {"status": "success", "count": len(people), "data": people}
+    except Exception as e:
+        logger.error(f"Error getting project people: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {"error": "OAuth token expired", "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."}
+        return {"error": "Execution error", "message": str(e)}
+
+
+@mcp.tool()
+async def search_people(name: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """Search for people by name (case-insensitive, partial match).
+
+    Use this to find a person's ID when you only know their name (or part of it).
+    For example, searching "zen" will match "Zenul Abidin".
+
+    Args:
+        name: Name (or partial name) to search for
+        project_id: Optional project ID to limit search to people on that project
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        if project_id:
+            people = await _run_sync(client.get_project_people, project_id)
+        else:
+            people = await _run_sync(client.get_people)
+
+        search_lower = name.lower()
+        matches = [
+            p for p in people
+            if search_lower in p.get("name", "").lower()
+            or search_lower in p.get("email_address", "").lower()
+        ]
+
+        return {
+            "status": "success",
+            "search_term": name,
+            "match_count": len(matches),
+            "matches": matches
+        }
+    except Exception as e:
+        logger.error(f"Error searching people: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {"error": "OAuth token expired", "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."}
+        return {"error": "Execution error", "message": str(e)}
+
 
 if __name__ == "__main__":
     logger.info("Starting Basecamp FastMCP server")
