@@ -304,14 +304,18 @@ async def create_todo(project_id: str, todolist_id: str, content: str,
                      notify: bool = False, 
                      due_on: Optional[str] = None, 
                      starts_on: Optional[str] = None) -> Dict[str, Any]:
-    """Create a new todo item in a todo list.
-    
+    """Create a new to-do item in a to-do list.
+
+    IMPORTANT: This creates a to-do (task) inside a to-do list, NOT a message.
+    Use create_message() to post announcements/discussions on the Message Board.
+    Use create_comment() to add a comment/reply on an existing to-do or message.
+
     Args:
         project_id: Project ID
-        todolist_id: The todo list ID
-        content: The todo item's text (required)
-        description: HTML description of the todo
-        assignee_ids: List of person IDs to assign
+        todolist_id: The to-do list ID (use get_todolists to find available lists)
+        content: The to-do item's text/title (required)
+        description: HTML description with additional details for the to-do
+        assignee_ids: List of person IDs to assign (use get_people or search_people to find IDs)
         completion_subscriber_ids: List of person IDs to notify on completion
         notify: Whether to notify assignees
         due_on: Due date in YYYY-MM-DD format
@@ -601,11 +605,11 @@ async def global_search(query: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def get_comments(recording_id: str, project_id: str, page: int = 1) -> Dict[str, Any]:
-    """Get comments for a Basecamp item.
+    """Get comments/replies on a Basecamp to-do, message, document, or other recording.
 
     Args:
-        recording_id: The item ID
-        project_id: The project ID
+        recording_id: The ID of the to-do, message, document, or other item to get comments for
+        project_id: The project ID (also called bucket ID)
         page: Page number for pagination (default: 1). Basecamp uses geared pagination:
               page 1 has 15 results, page 2 has 30, page 3 has 50, page 4+ has 100.
     """
@@ -637,12 +641,20 @@ async def get_comments(recording_id: str, project_id: str, page: int = 1) -> Dic
 
 @mcp.tool()
 async def create_comment(recording_id: str, project_id: str, content: str) -> Dict[str, Any]:
-    """Create a comment on a Basecamp item.
+    """Create a comment on any Basecamp recording — including to-dos, messages, documents, and other items.
+
+    Use this tool to add a comment/reply to an existing to-do item, message thread, document, or any
+    other Basecamp recording. In Basecamp, every commentable item has a unique recording ID.
+
+    Common use cases:
+    - Comment on a to-do: pass the to-do's ID as recording_id
+    - Reply to a message thread: pass the message's ID as recording_id
+    - Comment on a document: pass the document's ID as recording_id
 
     Args:
-        recording_id: The item ID
-        project_id: The project ID
-        content: The comment content in HTML format
+        recording_id: The ID of the to-do, message, document, or other Basecamp item to comment on
+        project_id: The project ID (also called bucket ID) that contains the item
+        content: The comment content in HTML format (e.g. '<p>Looks good!</p>')
     """
     client = _get_basecamp_client()
     if not client:
@@ -824,14 +836,21 @@ async def get_message_categories(project_id: str) -> Dict[str, Any]:
 async def create_message(project_id: str, subject: str, content: str,
                          message_board_id: Optional[str] = None,
                          category_id: Optional[str] = None) -> Dict[str, Any]:
-    """Create a new message on a project's message board.
+    """Create a new message (announcement/discussion thread) on a project's Message Board in Basecamp.
+
+    IMPORTANT: This creates a Message Board post (like an announcement or discussion thread), NOT a to-do item.
+    Use create_todo() to create to-do items. Use create_comment() to reply to existing messages or to-dos.
+
+    Messages in Basecamp are discussion threads posted to the Message Board. They have a subject line
+    and body content, similar to an email or forum post. They appear under the "Message Board" section
+    of a Basecamp project.
 
     Args:
         project_id: The project ID
-        subject: Message title/subject
-        content: Message body in HTML format
+        subject: Message title/subject line (required — this is the thread title)
+        content: Message body in HTML format (e.g. '<p>Here is the update...</p>')
         message_board_id: Optional message board ID. If not provided, will be auto-discovered from the project.
-        category_id: Optional message type/category ID
+        category_id: Optional message type/category ID (use get_message_categories to find available types)
     """
     client = _get_basecamp_client()
     if not client:
