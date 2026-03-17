@@ -2,7 +2,7 @@
 
 This project provides a **FastMCP-powered** integration for Basecamp 3, allowing AI clients to interact with Basecamp directly through the MCP protocol.
 
-✅ **Migration Complete:** Successfully migrated to official Anthropic FastMCP framework with **100% feature parity** (all 75 tools)
+✅ **Migration Complete:** Successfully migrated to official Anthropic FastMCP framework with **100% feature parity** (all 78 tools)
 🚀 **Ready for Production:** Full protocol compliance with MCP 2025-06-18
 
 ## Quick Setup
@@ -73,7 +73,7 @@ This server works with **Cursor**, **Codex**, and **Claude Desktop**. Choose you
 6. **Verify in Cursor:**
    - Go to Cursor Settings → MCP
    - You should see "basecamp" with a **green checkmark**
-   - Available tools: **75 tools** for complete Basecamp control
+   - Available tools: **78 tools** for complete Basecamp control
 
 ### Test Your Setup
 
@@ -172,7 +172,7 @@ Based on the [official MCP quickstart guide](https://modelcontextprotocol.io/qui
 
 4. **Verify in Claude Desktop:**
    - Look for the "Search and tools" icon (🔍) in the chat interface
-   - You should see "basecamp" listed with all 75 tools available
+   - You should see "basecamp" listed with all 78 tools available
    - Toggle the tools on to enable Basecamp integration
 
 ### Claude Desktop Configuration
@@ -233,7 +233,7 @@ ls ~/Library/Logs/Claude/mcp-server-basecamp.log
 
 Once configured, you can use these tools in Cursor:
 
-- `get_projects` - Get all Basecamp projects
+- `get_projects` - Get all Basecamp projects (returns all pages; handles Basecamp pagination transparently)
 - `get_project` - Get details for a specific project
 - `get_todolists` - Get todo lists for a project
 - `get_todolist` - Get a specific todo list by ID
@@ -273,6 +273,12 @@ Once configured, you can use these tools in Cursor:
 - `create_document` - Create a document
 - `update_document` - Update a document
 - `trash_document` - Move a document to trash
+
+### People Tools
+
+- `get_people` - Get all people in the Basecamp account (handles pagination)
+- `get_project_people` - Get all people with access to a specific project (handles pagination)
+- `search_people` - Search for people by name or email (case-insensitive, partial match) — use this to find person IDs for assigning todos, cards, etc.
 
 ### Todo List Group Tools
 
@@ -340,12 +346,14 @@ Ask Cursor things like:
 - "Show me all steps for this card"
 - "Create a sub-task for this card"
 - "Mark this card step as complete"
+- "Find the person named Zenul in the SatvaSolutions project"
+- "Assign this todo to Zenul"
 
 ## Architecture
 
 The project uses the **official Anthropic FastMCP framework** for maximum reliability and compatibility:
 
-1. **FastMCP Server** (`basecamp_fastmcp.py`) - Official MCP SDK with 75 tools, compatible with Cursor, Codex, and Claude Desktop
+1. **FastMCP Server** (`basecamp_fastmcp.py`) - Official MCP SDK with 78 tools, compatible with Cursor, Codex, and Claude Desktop
 2. **OAuth App** (`oauth_app.py`) - Handles OAuth 2.0 flow with Basecamp  
 3. **Token Storage** (`token_storage.py`) - Securely stores OAuth tokens
 4. **Basecamp Client** (`basecamp_client.py`) - Basecamp API client library
@@ -491,6 +499,24 @@ If you don't know your Basecamp account ID:
 - **Stdio (local):** OAuth tokens are stored in `oauth_tokens.json` in the project directory.
 - **SSE (multi-user):** Tokens are stored in `data/basecamp_mcp.db`. Each user has an API key; do not share API keys. Use `MCP_REQUIRE_AUTH=1` when hosting for multiple users or on a shared network.
 - For production SSE hosting, use HTTPS and a secure secret for `FLASK_SECRET_KEY`.
+
+## Version History
+
+### v1.2.0 (2026-03-13)
+
+- **New: People tools** — Added `get_people`, `get_project_people`, and `search_people` tools. AI assistants can now look up people by name (partial, case-insensitive) to find their IDs for assigning todos, cards, and other resources. Previously, assigning tasks required knowing numeric person IDs upfront.
+- **Fix: `get_people` pagination** — The existing `get_people()` method only returned the first page of results. Now handles Basecamp pagination to return all people.
+
+### v1.1.0 (2026-03-11)
+
+- **Fix: `get_projects` now returns all projects** — Previously, only the first page (up to 15 projects) was returned because the Basecamp API paginates list endpoints. The `get_projects()` method in `basecamp_client.py` now iterates through all pages using the `Link` header, matching the existing pagination pattern used by `get_todos()` and other list endpoints.
+
+### v1.0.0
+
+- Initial release with 75 MCP tools for Basecamp 3 integration
+- Support for Cursor, Codex, and Claude Desktop clients
+- OAuth 2.0 and Basic Auth support
+- SSE (Server-Sent Events) mode for multi-user hosting
 
 ## License
 

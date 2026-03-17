@@ -98,12 +98,36 @@ class BasecampClient:
 
     # Project methods
     def get_projects(self):
-        """Get all projects."""
-        response = self.get('projects.json')
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(f"Failed to get projects: {response.status_code} - {response.text}")
+        """Get all projects, handling pagination.
+
+        Basecamp paginates list endpoints (commonly 15 items per page). This
+        implementation follows pagination via the `page` query parameter and
+        the HTTP `Link` header if present, aggregating all pages before
+        returning the combined list.
+        """
+        endpoint = 'projects.json'
+
+        all_projects = []
+        page = 1
+
+        while True:
+            response = self.get(endpoint, params={"page": page})
+            if response.status_code != 200:
+                raise Exception(f"Failed to get projects: {response.status_code} - {response.text}")
+
+            page_items = response.json() or []
+            all_projects.extend(page_items)
+
+            # Check for next page using Link header or by empty result
+            link_header = response.headers.get("Link", "")
+            has_next = 'rel="next"' in link_header if link_header else False
+
+            if not page_items or not has_next:
+                break
+
+            page += 1
+
+        return all_projects
 
     def get_project(self, project_id):
         """Get a specific project by ID."""
@@ -507,12 +531,38 @@ class BasecampClient:
 
     # People methods
     def get_people(self):
-        """Get all people in the account."""
-        response = self.get('people.json')
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(f"Failed to get people: {response.status_code} - {response.text}")
+        """Get all people in the account (with pagination)."""
+        all_people = []
+        page = 1
+        while True:
+            response = self.get('people.json', params={"page": page})
+            if response.status_code != 200:
+                raise Exception(f"Failed to get people: {response.status_code} - {response.text}")
+            page_people = response.json() or []
+            all_people.extend(page_people)
+            link_header = response.headers.get("Link", "")
+            has_next = 'rel="next"' in link_header if link_header else False
+            if not page_people or not has_next:
+                break
+            page += 1
+        return all_people
+
+    def get_project_people(self, project_id):
+        """Get all people with access to a specific project (with pagination)."""
+        all_people = []
+        page = 1
+        while True:
+            response = self.get(f'projects/{project_id}/people.json', params={"page": page})
+            if response.status_code != 200:
+                raise Exception(f"Failed to get project people: {response.status_code} - {response.text}")
+            page_people = response.json() or []
+            all_people.extend(page_people)
+            link_header = response.headers.get("Link", "")
+            has_next = 'rel="next"' in link_header if link_header else False
+            if not page_people or not has_next:
+                break
+            page += 1
+        return all_people
 
     # Campfire (chat) methods
     def get_campfires(self, project_id):
