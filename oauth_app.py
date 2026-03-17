@@ -217,12 +217,18 @@ RESULTS_TEMPLATE = BASE_LAYOUT.replace("{% block body %}{% endblock %}", """
             <div class="card" style="border-color: rgba(34,197,94,0.4);">
                 <h2 style="color: var(--success);">You’re connected</h2>
                 <p>Use this in Cursor: paste into your project’s <code>.cursor/mcp.json</code> (or merge into <code>mcpServers</code>). Save your API key; it won’t be shown again.</p>
-                <div class="label">Copy this block into Cursor MCP config</div>
+                <div class="label">Cursor — paste into <code>.cursor/mcp.json</code> or merge into <code>mcpServers</code></div>
                 <div style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin: 8px 0 12px;">
                     <pre id="mcp-config" style="margin:0; padding:14px; font-size:0.8rem; white-space:pre; overflow:auto; max-height:200px;">{{ mcp_config_json | e }}</pre>
-                    <button type="button" class="copy-btn" data-copy="mcp-config" style="margin: 12px 14px;">Copy config</button>
+                    <button type="button" class="copy-btn" data-copy="mcp-config" style="margin: 12px 14px;">Copy Cursor config</button>
                 </div>
                 <p style="margin-top:12px; font-size:0.85rem;">Then reload Cursor (Ctrl+Shift+P → Developer: Reload Window).</p>
+                <div class="label" style="margin-top:20px;">Claude — run in terminal (SSE URL + Bearer header)</div>
+                <div style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin: 8px 0 12px;">
+                    <pre id="claude-mcp-command" style="margin:0; padding:14px; font-size:0.8rem; white-space:pre; overflow:auto; max-height:200px;">{{ claude_mcp_command | e }}</pre>
+                    <button type="button" class="copy-btn" data-copy="claude-mcp-command" style="margin: 12px 14px;">Copy Claude command</button>
+                </div>
+                <p style="margin-top:12px; font-size:0.85rem;">Paste the command into your terminal to add the Basecamp MCP server to Claude.</p>
                 <div class="actions"><a href="/help" class="btn btn-secondary">Instructions</a><a href="/" class="btn btn-secondary">Back to home</a></div>
             </div>
         {% endif %}
@@ -619,15 +625,23 @@ def auth_callback():
                     show_home=True,
                 )
             sse_url = os.getenv("MCP_SSE_URL", "http://localhost:8010").rstrip("/")
+            sse_full_url = sse_url + "/sse"
             mcp_config = {
                 "mcpServers": {
                     "basecamp": {
-                        "url": sse_url + "/sse",
+                        "url": sse_full_url,
                         "headers": {"Authorization": f"Bearer {api_key}"},
                     }
                 }
             }
             mcp_config_json = json.dumps(mcp_config, indent=2)
+            # Claude uses type+sse and the JSON is passed to: claude mcp add-json basecamp '<json>'
+            claude_config = {
+                "type": "sse",
+                "url": sse_full_url,
+                "headers": {"Authorization": f"Bearer {api_key}"},
+            }
+            claude_mcp_command = f"claude mcp add-json basecamp '{json.dumps(claude_config)}'"
             return render_template_string(
                 RESULTS_TEMPLATE,
                 title="Connected",
@@ -636,6 +650,7 @@ def auth_callback():
                 api_key=api_key,
                 sse_url=sse_url,
                 mcp_config_json=mcp_config_json,
+                claude_mcp_command=claude_mcp_command,
                 show_home=True,
             )
 
