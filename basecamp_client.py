@@ -213,7 +213,7 @@ class BasecampClient:
             raise Exception(f"Failed to update todolist: {response.status_code} - {response.text}")
 
     def trash_todolist(self, project_id, todolist_id):
-        """Move a todolist to the trash.
+        """Archive a todolist (safety: archives instead of trashing).
 
         Args:
             project_id (str): Project ID
@@ -222,12 +222,12 @@ class BasecampClient:
         Returns:
             bool: True if successful
         """
-        endpoint = f'buckets/{project_id}/recordings/{todolist_id}/status/trashed.json'
+        endpoint = f'buckets/{project_id}/recordings/{todolist_id}/status/archived.json'
         response = self.put(endpoint)
         if response.status_code == 204:
             return True
         else:
-            raise Exception(f"Failed to trash todolist: {response.status_code} - {response.text}")
+            raise Exception(f"Failed to archive todolist: {response.status_code} - {response.text}")
 
     # To-do methods
     def get_todos(self, project_id, todolist_id):
@@ -368,7 +368,7 @@ class BasecampClient:
 
     def delete_todo(self, project_id, todo_id):
         """
-        Move a todo item to the trash.
+        Archive a todo item (safety: archives instead of trashing).
 
         Args:
             project_id (str): Project ID
@@ -377,12 +377,12 @@ class BasecampClient:
         Returns:
             bool: True if successful
         """
-        endpoint = f'buckets/{project_id}/recordings/{todo_id}/status/trashed.json'
+        endpoint = f'buckets/{project_id}/recordings/{todo_id}/status/archived.json'
         response = self.put(endpoint)
         if response.status_code == 204:
             return True
         else:
-            raise Exception(f"Failed to trash todo: {response.status_code} - {response.text}")
+            raise Exception(f"Failed to archive todo: {response.status_code} - {response.text}")
 
     def archive_todo(self, project_id, todo_id):
         """
@@ -845,9 +845,9 @@ class BasecampClient:
             raise Exception(f"Failed to get inbox reply: {response.status_code} - {response.text}")
 
     def trash_forward(self, project_id, forward_id):
-        """Trash a forward.
+        """Archive a forward (safety: archives instead of trashing).
 
-        Uses the generic recordings trash endpoint, same pattern as trash_document.
+        Uses the generic recordings archive endpoint.
 
         Args:
             project_id: Project/bucket ID
@@ -856,12 +856,12 @@ class BasecampClient:
         Returns:
             bool: True if successful
         """
-        endpoint = f"buckets/{project_id}/recordings/{forward_id}/status/trashed.json"
+        endpoint = f"buckets/{project_id}/recordings/{forward_id}/status/archived.json"
         response = self.put(endpoint)
         if response.status_code == 204:
             return True
         else:
-            raise Exception(f"Failed to trash forward: {response.status_code} - {response.text}")
+            raise Exception(f"Failed to archive forward: {response.status_code} - {response.text}")
 
     # Schedule methods
     def get_schedule(self, project_id):
@@ -1001,7 +1001,7 @@ class BasecampClient:
 
     def delete_comment(self, comment_id, bucket_id):
         """
-        Delete a comment.
+        Archive a comment (safety: archives instead of deleting).
 
         Args:
             comment_id (int): Comment ID
@@ -1010,12 +1010,12 @@ class BasecampClient:
         Returns:
             bool: True if successful
         """
-        endpoint = f"buckets/{bucket_id}/comments/{comment_id}.json"
-        response = self.delete(endpoint)
+        endpoint = f"buckets/{bucket_id}/recordings/{comment_id}/status/archived.json"
+        response = self.put(endpoint)
         if response.status_code == 204:
             return True
         else:
-            raise Exception(f"Failed to delete comment: {response.status_code} - {response.text}")
+            raise Exception(f"Failed to archive comment: {response.status_code} - {response.text}")
 
     def get_daily_check_ins(self, project_id, page=1):
         project = self.get_project(project_id)
@@ -1386,13 +1386,13 @@ class BasecampClient:
             raise Exception(f"Failed to update document: {response.status_code} - {response.text}")
 
     def trash_document(self, project_id, document_id):
-        """Trash a document."""
-        endpoint = f"buckets/{project_id}/recordings/{document_id}/status/trashed.json"
+        """Archive a document (safety: archives instead of trashing)."""
+        endpoint = f"buckets/{project_id}/recordings/{document_id}/status/archived.json"
         response = self.put(endpoint)
         if response.status_code == 204:
             return True
         else:
-            raise Exception(f"Failed to trash document: {response.status_code} - {response.text}")
+            raise Exception(f"Failed to archive document: {response.status_code} - {response.text}")
 
     # Upload methods
     def get_uploads(self, project_id, vault_id=None):
