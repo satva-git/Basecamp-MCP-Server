@@ -421,9 +421,10 @@ async def update_todo(project_id: str, todo_id: str,
 
 @mcp.tool()
 async def delete_todo(project_id: str, todo_id: str) -> Dict[str, Any]:
-    """Move a todo item to the trash.
+    """Archive a todo item (safe deletion — archives instead of permanently deleting).
 
-    Trashed todos can be recovered from the Basecamp web UI within 30 days.
+    The todo will be hidden from the active list but remains accessible
+    via the Basecamp web UI and can be unarchived at any time.
 
     Args:
         project_id: Project ID
@@ -437,10 +438,10 @@ async def delete_todo(project_id: str, todo_id: str) -> Dict[str, Any]:
         await _run_sync(client.delete_todo, project_id, todo_id)
         return {
             "status": "success",
-            "message": "Todo moved to trash"
+            "message": "Todo archived (safe deletion)"
         }
     except Exception as e:
-        logger.error(f"Error trashing todo: {e}")
+        logger.error(f"Error archiving todo: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
             return {
                 "error": "OAuth token expired",
@@ -514,10 +515,10 @@ async def uncomplete_todo(project_id: str, todo_id: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def archive_todo(project_id: str, todo_id: str) -> Dict[str, Any]:
-    """Archive a todo item.
+    """Archive a todo item (this is the safe way to remove a todo).
 
     Archived todos are hidden from the active list but remain accessible
-    via the Basecamp web UI.
+    via the Basecamp web UI and can be unarchived at any time.
 
     Args:
         project_id: Project ID
@@ -1042,7 +1043,9 @@ async def get_inbox_reply(project_id: str, forward_id: str, reply_id: str) -> Di
 
 @mcp.tool()
 async def trash_forward(project_id: str, forward_id: str) -> Dict[str, Any]:
-    """Move a forwarded email to trash.
+    """Archive a forwarded email (safe deletion — archives instead of permanently deleting).
+
+    The forward will be hidden but remains accessible via the Basecamp web UI.
 
     Args:
         project_id: The project ID
@@ -1056,10 +1059,10 @@ async def trash_forward(project_id: str, forward_id: str) -> Dict[str, Any]:
         await _run_sync(client.trash_forward, project_id, forward_id)
         return {
             "status": "success",
-            "message": "Forward trashed"
+            "message": "Forward archived (safe deletion)"
         }
     except Exception as e:
-        logger.error(f"Error trashing forward: {e}")
+        logger.error(f"Error archiving forward: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
             return {
                 "error": "OAuth token expired",
@@ -2235,8 +2238,10 @@ async def update_document(project_id: str, document_id: str, title: Optional[str
 
 @mcp.tool()
 async def trash_document(project_id: str, document_id: str) -> Dict[str, Any]:
-    """Move a document to trash.
-    
+    """Archive a document (safe deletion — archives instead of permanently deleting).
+
+    The document will be hidden but remains accessible via the Basecamp web UI.
+
     Args:
         project_id: Project ID
         document_id: Document ID
@@ -2244,15 +2249,15 @@ async def trash_document(project_id: str, document_id: str) -> Dict[str, Any]:
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         await _run_sync(client.trash_document, project_id, document_id)
         return {
             "status": "success",
-            "message": "Document trashed"
+            "message": "Document archived (safe deletion)"
         }
     except Exception as e:
-        logger.error(f"Error trashing document: {e}")
+        logger.error(f"Error archiving document: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
             return {
                 "error": "OAuth token expired",
@@ -2411,9 +2416,10 @@ async def update_todolist(
 
 @mcp.tool()
 async def trash_todolist(project_id: str, todolist_id: str) -> Dict[str, Any]:
-    """Move a todo list to the trash.
+    """Archive a todo list (safe deletion — archives instead of permanently deleting).
 
-    Trashed lists can be recovered from the Basecamp web UI within 30 days.
+    The todo list will be hidden from the active view but remains accessible
+    via the Basecamp web UI and can be unarchived at any time.
 
     Args:
         project_id: The project ID
@@ -2425,9 +2431,9 @@ async def trash_todolist(project_id: str, todolist_id: str) -> Dict[str, Any]:
 
     try:
         await _run_sync(client.trash_todolist, project_id, todolist_id)
-        return {"status": "success", "message": f"Todolist {todolist_id} moved to trash"}
+        return {"status": "success", "message": f"Todolist {todolist_id} archived (safe deletion)"}
     except Exception as e:
-        logger.error(f"Error trashing todolist {todolist_id}: {e}")
+        logger.error(f"Error archiving todolist {todolist_id}: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
             return {"error": "OAuth token expired", "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."}
         return {"error": "Execution error", "message": str(e)}
