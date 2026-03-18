@@ -635,13 +635,11 @@ def auth_callback():
                 }
             }
             mcp_config_json = json.dumps(mcp_config, indent=2)
-            # Claude uses type+sse and the JSON is passed to: claude mcp add-json basecamp '<json>'
-            claude_config = {
-                "type": "sse",
-                "url": sse_full_url,
-                "headers": {"Authorization": f"Bearer {api_key}"},
-            }
-            claude_mcp_command = f"claude mcp add-json basecamp '{json.dumps(claude_config)}'"
+            # Claude CLI: prefer flag form (Windows-friendly; avoids JSON quoting issues)
+            claude_mcp_command = (
+                f'claude mcp add --transport sse basecamp {sse_full_url} '
+                f'--header "Authorization: Bearer {api_key}" --scope user'
+            )
             return render_template_string(
                 RESULTS_TEMPLATE,
                 title="Connected",
