@@ -1415,3 +1415,49 @@ class BasecampClient:
             return response.json()
         else:
             raise Exception(f"Failed to get upload: {response.status_code} - {response.text}")
+
+    # Vault methods (folder management for Documents)
+    def get_vaults(self, project_id, vault_id):
+        """List child vaults (subfolders) inside a vault."""
+        all_vaults = []
+        page = 1
+        while True:
+            endpoint = f"buckets/{project_id}/vaults/{vault_id}/vaults.json"
+            response = self.get(endpoint, params={"page": page})
+            if response.status_code != 200:
+                raise Exception(f"Failed to get vaults: {response.status_code} - {response.text}")
+            page_vaults = response.json() or []
+            all_vaults.extend(page_vaults)
+            link_header = response.headers.get("Link", "")
+            has_next = 'rel="next"' in link_header if link_header else False
+            if not page_vaults or not has_next:
+                break
+            page += 1
+        return all_vaults
+
+    def get_vault(self, project_id, vault_id):
+        """Get details of a vault including counts of documents, uploads, and child vaults."""
+        endpoint = f"buckets/{project_id}/vaults/{vault_id}.json"
+        response = self.get(endpoint)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to get vault: {response.status_code} - {response.text}")
+
+    def create_vault(self, project_id, vault_id, title):
+        """Create a new child vault (subfolder) inside a vault."""
+        endpoint = f"buckets/{project_id}/vaults/{vault_id}/vaults.json"
+        response = self.post(endpoint, {"title": title})
+        if response.status_code == 201:
+            return response.json()
+        else:
+            raise Exception(f"Failed to create vault: {response.status_code} - {response.text}")
+
+    def update_vault(self, project_id, vault_id, title):
+        """Rename a vault."""
+        endpoint = f"buckets/{project_id}/vaults/{vault_id}.json"
+        response = self.put(endpoint, {"title": title})
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to update vault: {response.status_code} - {response.text}")
