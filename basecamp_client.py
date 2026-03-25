@@ -89,7 +89,10 @@ class BasecampClient:
     def delete(self, endpoint):
         """Make a DELETE request to the Basecamp API."""
         url = f"{self.base_url}/{endpoint}"
-        return requests.delete(url, auth=self.auth, headers=self.headers)
+        # DELETE has no body — omit Content-Type to avoid 406, add Accept instead
+        delete_headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
+        delete_headers["Accept"] = "application/json"
+        return requests.delete(url, auth=self.auth, headers=delete_headers)
 
     def patch(self, endpoint, data=None):
         """Make a PATCH request to the Basecamp API."""
@@ -397,7 +400,7 @@ class BasecampClient:
         """
         endpoint = f'buckets/{project_id}/recordings/{todo_id}/status/archived.json'
         response = self.put(endpoint)
-        if response.status_code == 204:
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to archive todo: {response.status_code} - {response.text}")
@@ -1118,7 +1121,7 @@ class BasecampClient:
     def put_column_on_hold(self, project_id, column_id):
         """Put a column on hold."""
         response = self.post(f'buckets/{project_id}/card_tables/columns/{column_id}/on_hold.json')
-        if response.status_code == 204:
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to put column on hold: {response.status_code} - {response.text}")
@@ -1126,7 +1129,7 @@ class BasecampClient:
     def remove_column_hold(self, project_id, column_id):
         """Remove hold from a column."""
         response = self.delete(f'buckets/{project_id}/card_tables/columns/{column_id}/on_hold.json')
-        if response.status_code == 204:
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to remove column hold: {response.status_code} - {response.text}")
@@ -1206,17 +1209,27 @@ class BasecampClient:
             raise Exception(f"Failed to move card: {response.status_code} - {response.text}")
 
     def complete_card(self, project_id, card_id):
-        """Mark a card as complete."""
-        response = self.post(f'buckets/{project_id}/todos/{card_id}/completion.json')
-        if response.status_code == 201:
-            return response.json()
+        """Mark a card as complete using the card's own completion_url."""
+        card = self.get_card(project_id, card_id)
+        completion_url = card.get('completion_url')
+        if not completion_url:
+            raise Exception("Card has no completion_url — it may not support completion")
+        response = requests.post(completion_url, auth=self.auth, headers=self.headers)
+        if response.status_code in (200, 201):
+            return response.json() if response.text.strip() else True
         else:
             raise Exception(f"Failed to complete card: {response.status_code} - {response.text}")
 
     def uncomplete_card(self, project_id, card_id):
-        """Mark a card as incomplete."""
-        response = self.delete(f'buckets/{project_id}/todos/{card_id}/completion.json')
-        if response.status_code == 204:
+        """Mark a card as incomplete using the card's own completion_url."""
+        card = self.get_card(project_id, card_id)
+        completion_url = card.get('completion_url')
+        if not completion_url:
+            raise Exception("Card has no completion_url — it may not support completion")
+        delete_headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
+        delete_headers["Accept"] = "application/json"
+        response = requests.delete(completion_url, auth=self.auth, headers=delete_headers)
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to uncomplete card: {response.status_code} - {response.text}")
@@ -1272,28 +1285,49 @@ class BasecampClient:
             raise Exception(f"Failed to delete card step: {response.status_code} - {response.text}")
 
     def complete_card_step(self, project_id, step_id):
-        """Mark a card step as complete."""
-        response = self.post(f'buckets/{project_id}/todos/{step_id}/completion.json')
-        if response.status_code == 201:
-            return response.json()
+        """Mark a card step as complete using the step's own completion_url."""
+        step = self.get_card_step(project_id, step_id)
+        completion_url = step.get('completion_url')
+        if not completion_url:
+            raise Exception("Step has no completion_url")
+        # Resolve relative URL (e.g. /account_id/buckets/...) to absolute
+        if completion_url.startswith('/'):
+            completion_url = f"https://3.basecampapi.com{completion_url}"
+        response = requests.post(completion_url, auth=self.auth, headers=self.headers)
+        if response.status_code in (200, 201):
+            return response.json() if response.text.strip() else True
         else:
             raise Exception(f"Failed to complete card step: {response.status_code} - {response.text}")
 
     def uncomplete_card_step(self, project_id, step_id):
-        """Mark a card step as incomplete."""
-        response = self.delete(f'buckets/{project_id}/todos/{step_id}/completion.json')
-        if response.status_code == 204:
+        """Mark a card step as incomplete using the step's own completion_url."""
+        step = self.get_card_step(project_id, step_id)
+        completion_url = step.get('completion_url')
+        if not completion_url:
+            raise Exception("Step has no completion_url")
+        if completion_url.startswith('/'):
+            completion_url = f"https://3.basecampapi.com{completion_url}"
+        delete_headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
+        delete_headers["Accept"] = "application/json"
+        response = requests.delete(completion_url, auth=self.auth, headers=delete_headers)
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to uncomplete card step: {response.status_code} - {response.text}")
 
     # New methods for additional Basecamp API functionality
-    def create_attachment(self, file_path, name, content_type="application/octet-stream"):
-        """Upload an attachment and return the attachable sgid."""
-        with open(file_path, "rb") as f:
-            data = f.read()
+    def create_attachment(self, file_content_b64, name, content_type="application/octet-stream"):
+        """Upload an attachment and return the attachable sgid.
 
-        headers = self.headers.copy()
+        Args:
+            file_content_b64 (str): Base64-encoded file content
+            name (str): Filename for Basecamp
+            content_type (str): MIME type of the file
+        """
+        import base64
+        data = base64.b64decode(file_content_b64)
+
+        headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
         headers["Content-Type"] = content_type
         headers["Content-Length"] = str(len(data))
 

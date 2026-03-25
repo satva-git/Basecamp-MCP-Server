@@ -2022,20 +2022,23 @@ async def uncomplete_card_step(project_id: str, step_id: str) -> Dict[str, Any]:
 
 # Attachments, Events, and Webhooks
 @mcp.tool()
-async def create_attachment(file_path: str, name: str, content_type: Optional[str] = None) -> Dict[str, Any]:
-    """Upload a file as an attachment.
-    
+async def create_attachment(file_content_b64: str, name: str, content_type: Optional[str] = None) -> Dict[str, Any]:
+    """Upload a file as an attachment to Basecamp.
+
+    The returned attachable_sgid can be embedded in document or message content
+    using Basecamp's rich-text attachment syntax.
+
     Args:
-        file_path: Local path to file
-        name: Filename for Basecamp
-        content_type: MIME type
+        file_content_b64: Base64-encoded file content (encode your file bytes as base64 before calling)
+        name: Filename for Basecamp (e.g. "report.pdf")
+        content_type: MIME type of the file (e.g. "application/pdf", "image/png"). Defaults to application/octet-stream.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
-        result = await _run_sync(client.create_attachment, file_path, name, content_type or "application/octet-stream")
+        result = await _run_sync(client.create_attachment, file_content_b64, name, content_type or "application/octet-stream")
         return {
             "status": "success",
             "attachment": result
