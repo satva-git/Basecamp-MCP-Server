@@ -1428,6 +1428,60 @@ class BasecampClient:
         else:
             raise Exception(f"Failed to archive document: {response.status_code} - {response.text}")
 
+    def move_document(self, project_id, document_id, target_vault_id):
+        """Move a document to a different vault.
+
+        Basecamp has no native move API, so this method:
+        1. Fetches the source document (title + content)
+        2. Fetches all comments on the source document (handles pagination)
+        3. Creates a new document in the target vault
+        4. Re-creates each comment on the new document, prefixed with the original author name
+        5. Archives the source document
+
+        Args:
+            project_id (str): Project ID
+            document_id (str): ID of the document to move
+            target_vault_id (str): ID of the destination vault
+
+        Returns:
+            dict: new_document, comments_moved count, archived_document_id
+        """
+        # 1. Fetch source document
+        doc = self.get_document(project_id, document_id)
+        title = doc.get('title', 'Untitled')
+        content = doc.get('content', '')
+
+        # 2. Fetch all comments (paginate until exhausted)
+        all_comments = []
+        page = 1
+        while True:
+            result = self.get_comments(project_id, document_id, page=page)
+            all_comments.extend(result.get('comments', []))
+            next_page = result.get('next_page')
+            if not next_page:
+                break
+            page = next_page
+
+        # 3. Create new document in target vault
+        new_doc = self.create_document(project_id, target_vault_id, title, content)
+        new_doc_id = str(new_doc['id'])
+
+        # 4. Re-create comments on new document
+        for comment in all_comments:
+            author_name = comment.get('creator', {}).get('name', 'Unknown')
+            original_content = comment.get('content', '')
+            comment_html = f"<p><em>Originally by {author_name}:</em></p>{original_content}"
+            self.create_comment(new_doc_id, project_id, comment_html)
+
+        # 5. Archive source document
+        self.trash_document(project_id, document_id)
+
+        return {
+            'new_document': new_doc,
+            'comments_moved': len(all_comments),
+            'archived_document_id': document_id
+        }
+
     # Upload methods
     def get_uploads(self, project_id, vault_id=None):
         """List uploads in a project or vault."""
