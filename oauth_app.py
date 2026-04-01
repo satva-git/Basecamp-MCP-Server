@@ -372,15 +372,20 @@ def to_json(value, indent=None):
     return json.dumps(value, indent=indent)
 
 def get_oauth_client(redirect_uri=None):
-    """Get a configured OAuth client. Uses request host for redirect_uri when in request context."""
+    """Get a configured OAuth client.
+
+    When BASECAMP_REDIRECT_URI is set, it wins over url_for() so HTTPS matches
+    the registered callback behind a reverse proxy (Coolify, etc.); otherwise
+    Flask would often emit http:// from _external=True.
+    """
     try:
         client_id = os.getenv('BASECAMP_CLIENT_ID')
         client_secret = os.getenv('BASECAMP_CLIENT_SECRET')
         user_agent = os.getenv('USER_AGENT')
+        if redirect_uri is None:
+            redirect_uri = os.getenv("BASECAMP_REDIRECT_URI")
         if redirect_uri is None and request:
             redirect_uri = url_for("auth_callback", _external=True)
-        if redirect_uri is None:
-            redirect_uri = os.getenv('BASECAMP_REDIRECT_URI')
         logger.info("Creating OAuth client with redirect_uri: %s", redirect_uri)
         return BasecampOAuth(
             client_id=client_id,
