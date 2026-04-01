@@ -45,7 +45,71 @@ logging.basicConfig(
 logger = logging.getLogger('basecamp_fastmcp')
 
 # Initialize FastMCP server
-mcp = FastMCP("basecamp")
+mcp = FastMCP(
+    "basecamp",
+    instructions="""This MCP server connects to Basecamp 3 and exposes 82 tools for managing projects, tasks, documents, and team communication.
+
+## Authentication
+OAuth tokens are managed automatically. If you receive an authentication error, the user must visit http://localhost:8000 to re-authenticate via OAuth.
+
+## Key Tool Categories
+
+### Projects
+- get_projects — list all accessible projects (paginated)
+- get_project — get a single project with dock links to all its tools
+
+### Todos & Task Management
+- get_todolists, get_todolist, create_todolist, update_todolist, trash_todolist
+- get_todos, get_todo, create_todo, update_todo, delete_todo
+- complete_todo, uncomplete_todo, archive_todo, reposition_todo
+- get_todolist_groups, create_todolist_group, reposition_todolist_group
+
+### Documents & File Organization (Docs & Files)
+Basecamp organizes documents in vaults (folders). Navigate the hierarchy first:
+1. Call get_project → find the "vault" dock entry to get the root vault_id
+2. Call get_vaults to list subfolders, or get_vault for details
+3. Call get_documents to list documents in a vault
+- get_vaults — list subfolders inside a vault
+- get_vault — get vault details (document/upload/subfolder counts)
+- create_vault — create a new subfolder inside a vault
+- update_vault — rename a vault
+- get_documents, get_document, create_document, update_document, trash_document
+
+### Uploads
+- get_uploads, get_upload
+
+### Card Tables (Kanban Boards)
+- get_card_tables, get_card_table, get_columns, get_column, create_column, update_column
+- get_cards, get_card, create_card, update_card, move_card, complete_card, uncomplete_card
+- get_card_steps, create_card_step, get_card_step, update_card_step, complete_card_step, uncomplete_card_step, delete_card_step
+
+### Messages & Communication
+- get_message_board, get_messages, get_message, get_message_categories, create_message
+- get_campfire_lines (Campfire chat)
+- get_comments, create_comment
+
+### Inbox (Email Forwards)
+- get_inbox, get_forwards, get_forward, get_inbox_replies, get_inbox_reply, trash_forward
+
+### People
+- get_people, get_project_people, search_people
+
+### Search
+- search_basecamp — search within a project
+- global_search — search across all projects
+
+### Other
+- get_daily_check_ins, get_question_answers, get_events, get_uploads, create_attachment
+- get_webhooks, create_webhook, delete_webhook
+
+## Important Behaviors
+- **Safe deletions**: All delete/trash operations archive items instead of permanently deleting them. Archived items remain recoverable via the Basecamp web UI.
+- **Pagination**: List endpoints return paginated results; the server fetches all pages automatically.
+- **IDs**: All resource IDs are numeric strings. Get them from list/get calls — never guess or hardcode IDs.
+- **HTML content**: Document and message content fields accept HTML markup.
+- **Workflow tip**: For documents, always call get_project first to find the root vault_id, then navigate with get_vaults before creating or listing documents.
+"""
+)
 
 # Auth helper functions (multi-user aware when run over SSE)
 def _get_request_user_id() -> Optional[str]:
@@ -674,6 +738,53 @@ async def create_comment(recording_id: str, project_id: str, content: str) -> Di
             return {
                 "error": "OAuth token expired",
                 "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again.",
+            }
+        return {
+            "error": "Execution error",
+            "message": str(e)
+        }
+
+@mcp.tool()
+async def attach_url(project_id: str, recording_id: str, url: str, link_title: str, note: Optional[str] = None) -> Dict[str, Any]:
+    """Attach a URL (e.g. a Google Docs link) to any Basecamp item as a clickable comment.
+
+    Posts a comment on the target recording containing a formatted HTML hyperlink.
+    Viewers who have access to the linked resource (Google Docs, Figma, etc.) can
+    open it directly; those without access can request it through the source system.
+
+    Use this instead of downloading and re-uploading external files — just share
+    the URL and let permissions be managed at the source.
+
+    Args:
+        project_id: The project ID
+        recording_id: ID of the document, todo, message, or other item to attach the link to
+        url: The URL to link to (e.g. a Google Docs URL)
+        link_title: Display text for the clickable link
+        note: Optional extra context to include above the link (e.g. "Latest design spec")
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        parts = []
+        if note:
+            parts.append(f"<p>{note}</p>")
+        parts.append(f'<p><a href="{url}">{link_title}</a></p>')
+        html_content = "\n".join(parts)
+
+        comment = await _run_sync(client.create_comment, recording_id, project_id, html_content)
+        return {
+            "status": "success",
+            "comment": comment,
+            "message": f"Link attached: {link_title}"
+        }
+    except Exception as e:
+        logger.error(f"Error attaching URL: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {
+                "error": "OAuth token expired",
+                "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."
             }
         return {
             "error": "Execution error",
@@ -1436,7 +1547,7 @@ async def get_daily_check_ins(project_id: str, page: Optional[int] = None) -> Di
     try:
         if page is not None and not isinstance(page, int):
             page = 1
-        answers = await _run_sync(client.get_daily_check_ins, project_id, page=page or 1)
+        answers = await _run_sync(client.get_daily_check_ins, project_id, page or 1)
         return {
             "status": "success",
             "campfire_lines": answers,
@@ -1470,7 +1581,7 @@ async def get_question_answers(project_id: str, question_id: str, page: Optional
     try:
         if page is not None and not isinstance(page, int):
             page = 1
-        answers = await _run_sync(client.get_question_answers, project_id, question_id, page=page or 1)
+        answers = await _run_sync(client.get_question_answers, project_id, question_id, page or 1)
         return {
             "status": "success",
             "campfire_lines": answers,
@@ -1958,20 +2069,23 @@ async def uncomplete_card_step(project_id: str, step_id: str) -> Dict[str, Any]:
 
 # Attachments, Events, and Webhooks
 @mcp.tool()
-async def create_attachment(file_path: str, name: str, content_type: Optional[str] = None) -> Dict[str, Any]:
-    """Upload a file as an attachment.
-    
+async def create_attachment(file_content_b64: str, name: str, content_type: Optional[str] = None) -> Dict[str, Any]:
+    """Upload a file as an attachment to Basecamp.
+
+    The returned attachable_sgid can be embedded in document or message content
+    using Basecamp's rich-text attachment syntax.
+
     Args:
-        file_path: Local path to file
-        name: Filename for Basecamp
-        content_type: MIME type
+        file_content_b64: Base64-encoded file content (encode your file bytes as base64 before calling)
+        name: Filename for Basecamp (e.g. "report.pdf")
+        content_type: MIME type of the file (e.g. "application/pdf", "image/png"). Defaults to application/octet-stream.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
-        result = await _run_sync(client.create_attachment, file_path, name, content_type or "application/octet-stream")
+        result = await _run_sync(client.create_attachment, file_content_b64, name, content_type or "application/octet-stream")
         return {
             "status": "success",
             "attachment": result
@@ -2258,6 +2372,188 @@ async def trash_document(project_id: str, document_id: str) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Error archiving document: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {
+                "error": "OAuth token expired",
+                "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."
+            }
+        return {
+            "error": "Execution error",
+            "message": str(e)
+        }
+
+@mcp.tool()
+async def move_document(project_id: str, document_id: str, target_vault_id: str) -> Dict[str, Any]:
+    """Move a document to a different vault (folder) within the same project.
+
+    Because Basecamp has no native move API, this tool:
+    1. Fetches the source document's title and content
+    2. Fetches all comments on the source document (across all pages)
+    3. Creates a new document in the target vault with the same title and content
+    4. Re-creates each comment on the new document, noting the original author
+    5. Archives the source document (safe deletion — recoverable via Basecamp web UI)
+
+    The archived original and all its new copies remain accessible during the
+    30-day recovery window in Basecamp's trash.
+
+    Args:
+        project_id: The project ID
+        document_id: ID of the document to move
+        target_vault_id: ID of the destination vault (folder)
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        result = await _run_sync(client.move_document, project_id, document_id, target_vault_id)
+        new_doc = result['new_document']
+        return {
+            "status": "success",
+            "new_document_id": str(new_doc['id']),
+            "new_document_title": new_doc.get('title'),
+            "new_document_url": new_doc.get('app_url'),
+            "comments_moved": result['comments_moved'],
+            "archived_document_id": result['archived_document_id'],
+            "message": (
+                f"Document moved: '{new_doc.get('title')}' is now in the target vault. "
+                f"{result['comments_moved']} comment(s) re-created. "
+                f"Original (ID {result['archived_document_id']}) archived."
+            )
+        }
+    except Exception as e:
+        logger.error(f"Error moving document {document_id}: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {
+                "error": "OAuth token expired",
+                "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."
+            }
+        return {
+            "error": "Execution error",
+            "message": str(e)
+        }
+
+# Vault Management (document folders)
+@mcp.tool()
+async def get_vaults(project_id: str, vault_id: str) -> Dict[str, Any]:
+    """List child vaults (subfolders) inside a vault in a Basecamp project.
+
+    Use this to navigate the document folder structure. To find the top-level
+    vault for a project's Docs & Files section, call get_project first and
+    look for the 'vault' dock entry which contains the root vault_id.
+
+    Args:
+        project_id: The project ID
+        vault_id: The parent vault ID whose children to list
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        vaults = await _run_sync(client.get_vaults, project_id, vault_id)
+        return {
+            "status": "success",
+            "vaults": vaults,
+            "count": len(vaults)
+        }
+    except Exception as e:
+        logger.error(f"Error getting vaults: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {
+                "error": "OAuth token expired",
+                "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."
+            }
+        return {
+            "error": "Execution error",
+            "message": str(e)
+        }
+
+@mcp.tool()
+async def get_vault(project_id: str, vault_id: str) -> Dict[str, Any]:
+    """Get details of a specific vault (folder) in a Basecamp project.
+
+    Returns vault metadata including title, counts of documents, uploads,
+    and child vaults, plus URLs to list its contents.
+
+    Args:
+        project_id: The project ID
+        vault_id: The vault ID
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        vault = await _run_sync(client.get_vault, project_id, vault_id)
+        return {
+            "status": "success",
+            "vault": vault
+        }
+    except Exception as e:
+        logger.error(f"Error getting vault: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {
+                "error": "OAuth token expired",
+                "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."
+            }
+        return {
+            "error": "Execution error",
+            "message": str(e)
+        }
+
+@mcp.tool()
+async def create_vault(project_id: str, vault_id: str, title: str) -> Dict[str, Any]:
+    """Create a new subfolder (child vault) inside an existing vault in a Basecamp project.
+
+    Args:
+        project_id: The project ID
+        vault_id: The parent vault ID to create the subfolder inside
+        title: Name for the new subfolder
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        vault = await _run_sync(client.create_vault, project_id, vault_id, title)
+        return {
+            "status": "success",
+            "vault": vault
+        }
+    except Exception as e:
+        logger.error(f"Error creating vault: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {
+                "error": "OAuth token expired",
+                "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."
+            }
+        return {
+            "error": "Execution error",
+            "message": str(e)
+        }
+
+@mcp.tool()
+async def update_vault(project_id: str, vault_id: str, title: str) -> Dict[str, Any]:
+    """Rename a vault (folder) in a Basecamp project.
+
+    Args:
+        project_id: The project ID
+        vault_id: The vault ID to rename
+        title: The new name for the vault
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    try:
+        vault = await _run_sync(client.update_vault, project_id, vault_id, title)
+        return {
+            "status": "success",
+            "vault": vault
+        }
+    except Exception as e:
+        logger.error(f"Error updating vault: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
             return {
                 "error": "OAuth token expired",

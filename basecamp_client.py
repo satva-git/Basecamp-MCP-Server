@@ -89,7 +89,10 @@ class BasecampClient:
     def delete(self, endpoint):
         """Make a DELETE request to the Basecamp API."""
         url = f"{self.base_url}/{endpoint}"
-        return requests.delete(url, auth=self.auth, headers=self.headers)
+        # DELETE has no body — omit Content-Type to avoid 406, add Accept instead
+        delete_headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
+        delete_headers["Accept"] = "application/json"
+        return requests.delete(url, auth=self.auth, headers=delete_headers)
 
     def patch(self, endpoint, data=None):
         """Make a PATCH request to the Basecamp API."""
@@ -397,7 +400,7 @@ class BasecampClient:
         """
         endpoint = f'buckets/{project_id}/recordings/{todo_id}/status/archived.json'
         response = self.put(endpoint)
-        if response.status_code == 204:
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to archive todo: {response.status_code} - {response.text}")
@@ -1118,7 +1121,7 @@ class BasecampClient:
     def put_column_on_hold(self, project_id, column_id):
         """Put a column on hold."""
         response = self.post(f'buckets/{project_id}/card_tables/columns/{column_id}/on_hold.json')
-        if response.status_code == 204:
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to put column on hold: {response.status_code} - {response.text}")
@@ -1126,7 +1129,7 @@ class BasecampClient:
     def remove_column_hold(self, project_id, column_id):
         """Remove hold from a column."""
         response = self.delete(f'buckets/{project_id}/card_tables/columns/{column_id}/on_hold.json')
-        if response.status_code == 204:
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to remove column hold: {response.status_code} - {response.text}")
@@ -1206,17 +1209,27 @@ class BasecampClient:
             raise Exception(f"Failed to move card: {response.status_code} - {response.text}")
 
     def complete_card(self, project_id, card_id):
-        """Mark a card as complete."""
-        response = self.post(f'buckets/{project_id}/todos/{card_id}/completion.json')
-        if response.status_code == 201:
-            return response.json()
+        """Mark a card as complete using the card's own completion_url."""
+        card = self.get_card(project_id, card_id)
+        completion_url = card.get('completion_url')
+        if not completion_url:
+            raise Exception("Card has no completion_url — it may not support completion")
+        response = requests.post(completion_url, auth=self.auth, headers=self.headers)
+        if response.status_code in (200, 201):
+            return response.json() if response.text.strip() else True
         else:
             raise Exception(f"Failed to complete card: {response.status_code} - {response.text}")
 
     def uncomplete_card(self, project_id, card_id):
-        """Mark a card as incomplete."""
-        response = self.delete(f'buckets/{project_id}/todos/{card_id}/completion.json')
-        if response.status_code == 204:
+        """Mark a card as incomplete using the card's own completion_url."""
+        card = self.get_card(project_id, card_id)
+        completion_url = card.get('completion_url')
+        if not completion_url:
+            raise Exception("Card has no completion_url — it may not support completion")
+        delete_headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
+        delete_headers["Accept"] = "application/json"
+        response = requests.delete(completion_url, auth=self.auth, headers=delete_headers)
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to uncomplete card: {response.status_code} - {response.text}")
@@ -1272,28 +1285,49 @@ class BasecampClient:
             raise Exception(f"Failed to delete card step: {response.status_code} - {response.text}")
 
     def complete_card_step(self, project_id, step_id):
-        """Mark a card step as complete."""
-        response = self.post(f'buckets/{project_id}/todos/{step_id}/completion.json')
-        if response.status_code == 201:
-            return response.json()
+        """Mark a card step as complete using the step's own completion_url."""
+        step = self.get_card_step(project_id, step_id)
+        completion_url = step.get('completion_url')
+        if not completion_url:
+            raise Exception("Step has no completion_url")
+        # Resolve relative URL (e.g. /account_id/buckets/...) to absolute
+        if completion_url.startswith('/'):
+            completion_url = f"https://3.basecampapi.com{completion_url}"
+        response = requests.post(completion_url, auth=self.auth, headers=self.headers)
+        if response.status_code in (200, 201):
+            return response.json() if response.text.strip() else True
         else:
             raise Exception(f"Failed to complete card step: {response.status_code} - {response.text}")
 
     def uncomplete_card_step(self, project_id, step_id):
-        """Mark a card step as incomplete."""
-        response = self.delete(f'buckets/{project_id}/todos/{step_id}/completion.json')
-        if response.status_code == 204:
+        """Mark a card step as incomplete using the step's own completion_url."""
+        step = self.get_card_step(project_id, step_id)
+        completion_url = step.get('completion_url')
+        if not completion_url:
+            raise Exception("Step has no completion_url")
+        if completion_url.startswith('/'):
+            completion_url = f"https://3.basecampapi.com{completion_url}"
+        delete_headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
+        delete_headers["Accept"] = "application/json"
+        response = requests.delete(completion_url, auth=self.auth, headers=delete_headers)
+        if response.status_code in (200, 204):
             return True
         else:
             raise Exception(f"Failed to uncomplete card step: {response.status_code} - {response.text}")
 
     # New methods for additional Basecamp API functionality
-    def create_attachment(self, file_path, name, content_type="application/octet-stream"):
-        """Upload an attachment and return the attachable sgid."""
-        with open(file_path, "rb") as f:
-            data = f.read()
+    def create_attachment(self, file_content_b64, name, content_type="application/octet-stream"):
+        """Upload an attachment and return the attachable sgid.
 
-        headers = self.headers.copy()
+        Args:
+            file_content_b64 (str): Base64-encoded file content
+            name (str): Filename for Basecamp
+            content_type (str): MIME type of the file
+        """
+        import base64
+        data = base64.b64decode(file_content_b64)
+
+        headers = {k: v for k, v in self.headers.items() if k != "Content-Type"}
         headers["Content-Type"] = content_type
         headers["Content-Length"] = str(len(data))
 
@@ -1394,6 +1428,60 @@ class BasecampClient:
         else:
             raise Exception(f"Failed to archive document: {response.status_code} - {response.text}")
 
+    def move_document(self, project_id, document_id, target_vault_id):
+        """Move a document to a different vault.
+
+        Basecamp has no native move API, so this method:
+        1. Fetches the source document (title + content)
+        2. Fetches all comments on the source document (handles pagination)
+        3. Creates a new document in the target vault
+        4. Re-creates each comment on the new document, prefixed with the original author name
+        5. Archives the source document
+
+        Args:
+            project_id (str): Project ID
+            document_id (str): ID of the document to move
+            target_vault_id (str): ID of the destination vault
+
+        Returns:
+            dict: new_document, comments_moved count, archived_document_id
+        """
+        # 1. Fetch source document
+        doc = self.get_document(project_id, document_id)
+        title = doc.get('title', 'Untitled')
+        content = doc.get('content', '')
+
+        # 2. Fetch all comments (paginate until exhausted)
+        all_comments = []
+        page = 1
+        while True:
+            result = self.get_comments(project_id, document_id, page=page)
+            all_comments.extend(result.get('comments', []))
+            next_page = result.get('next_page')
+            if not next_page:
+                break
+            page = next_page
+
+        # 3. Create new document in target vault
+        new_doc = self.create_document(project_id, target_vault_id, title, content)
+        new_doc_id = str(new_doc['id'])
+
+        # 4. Re-create comments on new document
+        for comment in all_comments:
+            author_name = comment.get('creator', {}).get('name', 'Unknown')
+            original_content = comment.get('content', '')
+            comment_html = f"<p><em>Originally by {author_name}:</em></p>{original_content}"
+            self.create_comment(new_doc_id, project_id, comment_html)
+
+        # 5. Archive source document
+        self.trash_document(project_id, document_id)
+
+        return {
+            'new_document': new_doc,
+            'comments_moved': len(all_comments),
+            'archived_document_id': document_id
+        }
+
     # Upload methods
     def get_uploads(self, project_id, vault_id=None):
         """List uploads in a project or vault."""
@@ -1415,3 +1503,49 @@ class BasecampClient:
             return response.json()
         else:
             raise Exception(f"Failed to get upload: {response.status_code} - {response.text}")
+
+    # Vault methods (folder management for Documents)
+    def get_vaults(self, project_id, vault_id):
+        """List child vaults (subfolders) inside a vault."""
+        all_vaults = []
+        page = 1
+        while True:
+            endpoint = f"buckets/{project_id}/vaults/{vault_id}/vaults.json"
+            response = self.get(endpoint, params={"page": page})
+            if response.status_code != 200:
+                raise Exception(f"Failed to get vaults: {response.status_code} - {response.text}")
+            page_vaults = response.json() or []
+            all_vaults.extend(page_vaults)
+            link_header = response.headers.get("Link", "")
+            has_next = 'rel="next"' in link_header if link_header else False
+            if not page_vaults or not has_next:
+                break
+            page += 1
+        return all_vaults
+
+    def get_vault(self, project_id, vault_id):
+        """Get details of a vault including counts of documents, uploads, and child vaults."""
+        endpoint = f"buckets/{project_id}/vaults/{vault_id}.json"
+        response = self.get(endpoint)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to get vault: {response.status_code} - {response.text}")
+
+    def create_vault(self, project_id, vault_id, title):
+        """Create a new child vault (subfolder) inside a vault."""
+        endpoint = f"buckets/{project_id}/vaults/{vault_id}/vaults.json"
+        response = self.post(endpoint, {"title": title})
+        if response.status_code == 201:
+            return response.json()
+        else:
+            raise Exception(f"Failed to create vault: {response.status_code} - {response.text}")
+
+    def update_vault(self, project_id, vault_id, title):
+        """Rename a vault."""
+        endpoint = f"buckets/{project_id}/vaults/{vault_id}.json"
+        response = self.put(endpoint, {"title": title})
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to update vault: {response.status_code} - {response.text}")
