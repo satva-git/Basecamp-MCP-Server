@@ -327,7 +327,7 @@ class BasecampClient:
                     completion_subscriber_ids=None, notify=None, due_on=None, starts_on=None):
         """
         Update an existing todo item.
-        
+
         Args:
             project_id (str): Project ID
             todo_id (str): Todo ID
@@ -338,13 +338,13 @@ class BasecampClient:
             notify (bool, optional): Whether to notify assignees
             due_on (str, optional): Due date in YYYY-MM-DD format
             starts_on (str, optional): Start date in YYYY-MM-DD format
-            
+
         Returns:
             dict: The updated todo
         """
         endpoint = f'buckets/{project_id}/todos/{todo_id}.json'
         data = {}
-        
+
         if content is not None:
             data['content'] = content
         if description is not None:
@@ -362,7 +362,14 @@ class BasecampClient:
 
         if not data:
             raise ValueError("No fields provided to update")
-            
+
+        # Basecamp API requires 'content' in the PUT body for updates.
+        # If content wasn't provided, fetch the current todo to include it,
+        # otherwise fields like 'description' may be silently ignored.
+        if 'content' not in data:
+            current_todo = self.get_todo(project_id, todo_id)
+            data['content'] = current_todo.get('content', '')
+
         response = self.put(endpoint, data)
         if response.status_code == 200:
             return response.json()
