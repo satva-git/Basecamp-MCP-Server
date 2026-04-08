@@ -22,6 +22,7 @@ python oauth_app.py                  # Start OAuth server at http://localhost:80
 # Run the MCP server (for testing)
 ./venv/bin/python basecamp_fastmcp.py    # FastMCP server (recommended)
 ./venv/bin/python mcp_server_cli.py      # Legacy CLI server
+./venv/bin/python run_mcp_server_sse.py   # HTTP: SSE /sse + Streamable HTTP /mcp (hosted)
 
 # Test the server manually
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
@@ -50,6 +51,7 @@ python generate_claude_desktop_config.py   # For Claude Desktop
 | `token_storage.py` | Thread-safe OAuth token persistence (`oauth_tokens.json`) |
 | `search_utils.py` | Cross-project search functionality |
 | `oauth_app.py` | Flask app for OAuth flow (browser-based login) |
+| `run_mcp_server_sse.py` | Hosted MCP over HTTP: **SSE** (`/sse`) + **Streamable HTTP** (`/mcp` by default) for remote clients (Cursor, Codex) |
 
 ### Data Flow
 

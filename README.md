@@ -364,18 +364,25 @@ The project uses the **official Anthropic FastMCP framework** for maximum reliab
    - `generate_codex_config.py` - For Codex CLI integration
    - `generate_claude_desktop_config.py` - For Claude Desktop integration
 
-## Hosting the MCP server (SSE) & Multi-user
+## Hosting the MCP server (SSE + Streamable HTTP) & Multi-user
 
-You can run the MCP server over **SSE (Server-Sent Events)** so it is reachable via HTTP (e.g. on a remote host or in Docker). This mode supports **multiple users**, each with their own Basecamp link and API key.
+You can run the MCP server over HTTP so it is reachable remotely (e.g. Coolify, Docker). The same process serves:
+
+- **SSE** (e.g. Cursor, Claude CLI): `https://<host>/sse`
+- **Streamable HTTP** (e.g. [OpenAI Codex](https://developers.openai.com/codex/mcp) remote MCP): `https://<host>/mcp` by default
+
+This mode supports **multiple users**, each with their own Basecamp link and API key.
 
 ### Environment variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MCP_HOST` | Bind address for the SSE server | `0.0.0.0` |
-| `MCP_PORT` | Port for the SSE server | `8010` |
+| `MCP_HOST` | Bind address for the HTTP server | `0.0.0.0` |
+| `MCP_PORT` | Port | `8010` |
 | `MCP_REQUIRE_AUTH` | If `1`, `true`, or `yes`, require `Authorization: Bearer <api_key>` on every request | unset (single-user fallback allowed) |
-| `MCP_SSE_URL` | Public URL of the SSE server (shown to users after linking Basecamp) | `http://localhost:8010` |
+| `MCP_ENABLE_STREAMABLE_HTTP` | If `true`/`1`/`yes`, mount Streamable HTTP (Codex). If `false`, SSE only | `true` (when unset) |
+| `MCP_STREAMABLE_HTTP_PATH` | Path for Streamable HTTP | `/mcp` |
+| `MCP_SSE_URL` | **Public origin only** of the MCP server (no `/sse` or `/mcp`); used on the OAuth success page to build client URLs | `http://localhost:8010` |
 | `DATA_DIR` | Directory for SQLite DB (created under project root as `data/` if not set) | `./data` |
 
 User and token data are stored in **`data/basecamp_mcp.db`** (SQLite). Create this directory or set `DATA_DIR` if you run from a different working directory.
@@ -386,8 +393,9 @@ User and token data are stored in **`data/basecamp_mcp.db`** (SQLite). Create th
 2. **Visit the OAuth app** in a browser (e.g. `http://localhost:8000` or your deployed URL).
 3. Click **“Sign up with Basecamp”** (or the link to connect Basecamp), complete the Basecamp OAuth flow.
 4. On success you get a **personal API key** and an **MCP config** snippet. Copy the API key (it is not shown again) and use it as `Authorization: Bearer <api_key>` when connecting to the SSE server.
-5. **Configure your MCP client** with the SSE URL and header:
-   - **URL:** `http://<host>:<port>/` (e.g. `http://localhost:8010/` or `https://your-domain.com/`)
+5. **Configure your MCP client** with the correct URL and header:
+   - **Cursor / SSE clients:** `http://<host>:<port>/sse` (or `https://…/sse` in production)
+   - **OpenAI Codex (Streamable HTTP):** `http://<host>:<port>/mcp` — use `url` + `bearer_token_env_var` in `~/.codex/config.toml` (see [Codex MCP docs](https://developers.openai.com/codex/mcp))
    - **Header:** `Authorization: Bearer <your_api_key>`
 
 Example Cursor config for SSE (multi-user):
@@ -396,14 +404,22 @@ Example Cursor config for SSE (multi-user):
 {
   "mcpServers": {
     "basecamp": {
-      "url": "http://localhost:8010/",
+      "url": "http://localhost:8010/sse",
       "headers": { "Authorization": "Bearer YOUR_API_KEY" }
     }
   }
 }
 ```
 
-For **remote hosting** (e.g. Coolify, Docker, or a VPS), set `MCP_SSE_URL` to the public URL (e.g. `https://mcp.yourdomain.com`) so the success page shows the correct URL. On localhost, the default `http://localhost:8010` is fine.
+Example Codex `config.toml` fragment (set `MCP_BEARER_TOKEN` to your API key in the environment where Codex runs):
+
+```toml
+[mcp_servers.basecamp]
+url = "https://mcp.yourdomain.com/mcp"
+bearer_token_env_var = "MCP_BEARER_TOKEN"
+```
+
+For **remote hosting** (e.g. Coolify, Docker, or a VPS), set `MCP_SSE_URL` to the **origin only** (e.g. `https://mcp.yourdomain.com`, not `…/sse` or `…/mcp`) so the OAuth success page builds correct `/sse` and `/mcp` links. On localhost, the default `http://localhost:8010` is fine.
 
 ### Auth behavior
 

@@ -36,6 +36,27 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+
+def _mcp_public_base_url():
+    """
+    Normalize MCP_SSE_URL to the public origin only.
+    Strips accidental /sse or /mcp suffixes so we do not produce .../sse/sse.
+    """
+    raw = (os.getenv("MCP_SSE_URL") or "http://localhost:8010").strip()
+    base = raw.rstrip("/")
+    for suffix in ("/sse", "/mcp"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+    return base or "http://localhost:8010"
+
+
+def _streamable_http_path():
+    """Path for Streamable HTTP (Codex); must match run_mcp_server_sse / FastMCP default."""
+    p = (os.getenv("MCP_STREAMABLE_HTTP_PATH") or "/mcp").strip()
+    if not p.startswith("/"):
+        p = "/" + p
+    return p
+
 # Check for required environment variables
 required_vars = ['BASECAMP_CLIENT_ID', 'BASECAMP_CLIENT_SECRET', 'BASECAMP_REDIRECT_URI', 'USER_AGENT']
 missing_vars = [var for var in required_vars if not os.getenv(var)]
@@ -229,6 +250,13 @@ RESULTS_TEMPLATE = BASE_LAYOUT.replace("{% block body %}{% endblock %}", """
                     <button type="button" class="copy-btn" data-copy="claude-mcp-command" style="margin: 12px 14px;">Copy Claude command</button>
                 </div>
                 <p style="margin-top:12px; font-size:0.85rem;">Paste the command into your terminal to add the Basecamp MCP server to Claude.</p>
+                <div class="label" style="margin-top:20px;">OpenAI Codex — Streamable HTTP (merge into <code>~/.codex/config.toml</code>)</div>
+                <p style="margin-top:8px; font-size:0.85rem;">Set environment variable <code>MCP_BEARER_TOKEN</code> to your API key (same as below) where Codex runs, then save the snippet.</p>
+                <div style="background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin: 8px 0 12px;">
+                    <pre id="codex-config" style="margin:0; padding:14px; font-size:0.8rem; white-space:pre; overflow:auto; max-height:200px;">{{ codex_config_toml | e }}</pre>
+                    <button type="button" class="copy-btn" data-copy="codex-config" style="margin: 12px 14px;">Copy Codex config</button>
+                </div>
+                <p style="margin-top:8px; font-size:0.85rem;">URL for reference: <code>{{ streamable_full_url | e }}</code></p>
                 <div class="actions"><a href="/help" class="btn btn-secondary">Instructions</a><a href="/" class="btn btn-secondary">Back to home</a></div>
             </div>
         {% endif %}
@@ -629,8 +657,9 @@ def auth_callback():
                     message="Failed to store token. Please try again.",
                     show_home=True,
                 )
-            sse_url = os.getenv("MCP_SSE_URL", "http://localhost:8010").rstrip("/")
-            sse_full_url = sse_url + "/sse"
+            mcp_base = _mcp_public_base_url()
+            sse_full_url = mcp_base.rstrip("/") + "/sse"
+            streamable_full_url = mcp_base.rstrip("/") + _streamable_http_path()
             mcp_config = {
                 "mcpServers": {
                     "basecamp": {
@@ -645,15 +674,23 @@ def auth_callback():
                 f'claude mcp add --transport sse basecamp {sse_full_url} '
                 f'--header "Authorization: Bearer {api_key}" --scope user'
             )
+            # OpenAI Codex: Streamable HTTP — merge into ~/.codex/config.toml; set MCP_BEARER_TOKEN to this API key
+            codex_config_toml = (
+                f'[mcp_servers.basecamp]\n'
+                f'url = "{streamable_full_url}"\n'
+                f'bearer_token_env_var = "MCP_BEARER_TOKEN"\n'
+            )
             return render_template_string(
                 RESULTS_TEMPLATE,
                 title="Connected",
                 message="You can now use the MCP server with the details below. Save your API key; it won't be shown again.",
                 api_key_success=True,
                 api_key=api_key,
-                sse_url=sse_url,
+                sse_url=mcp_base,
                 mcp_config_json=mcp_config_json,
                 claude_mcp_command=claude_mcp_command,
+                codex_config_toml=codex_config_toml,
+                streamable_full_url=streamable_full_url,
                 show_home=True,
             )
 

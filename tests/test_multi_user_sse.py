@@ -215,3 +215,47 @@ def test_sse_auth_middleware_allows_single_user_without_auth():
                     app.assert_called_once()
 
     asyncio.run(run())
+
+
+def test_streamable_http_mcp_path_returns_401_without_bearer_when_required():
+    """GET /mcp returns 401 when auth is required and no API key (Streamable HTTP + SSE combined app)."""
+    import run_mcp_server_sse
+    import user_store
+    from starlette.testclient import TestClient
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(user_store, "DATA_DIR", tmp), patch.object(
+            user_store, "DB_PATH", os.path.join(tmp, "t.db")
+        ):
+            with patch.dict(
+                os.environ,
+                {"MCP_REQUIRE_AUTH": "1", "MCP_ENABLE_STREAMABLE_HTTP": "true"},
+                clear=False,
+            ):
+                with patch.object(run_mcp_server_sse.user_store, "user_count", return_value=0):
+                    with patch.object(
+                        run_mcp_server_sse.user_store, "get_single_user_id", return_value=None
+                    ):
+                        app = run_mcp_server_sse.build_mcp_asgi_app(8010)
+                        with TestClient(app) as client:
+                            r = client.get("/mcp")
+                            assert r.status_code == 401
+                            body = r.json()
+                            assert body.get("error") == "Unauthorized"
+
+
+def test_streamable_http_disabled_returns_404_for_mcp_path():
+    """When MCP_ENABLE_STREAMABLE_HTTP=false, /mcp is not mounted (404)."""
+    import run_mcp_server_sse
+    import user_store
+    from starlette.testclient import TestClient
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(user_store, "DATA_DIR", tmp), patch.object(
+            user_store, "DB_PATH", os.path.join(tmp, "t.db")
+        ):
+            with patch.dict(os.environ, {"MCP_ENABLE_STREAMABLE_HTTP": "false"}, clear=False):
+                app = run_mcp_server_sse.build_mcp_asgi_app(8010)
+                with TestClient(app) as client:
+                    r = client.get("/mcp")
+                    assert r.status_code == 404

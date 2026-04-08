@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Run the Basecamp MCP server over SSE (Server-Sent Events) so it can be hosted
-and reached via HTTP. Use this when you want to run the server as a long-lived
-process (e.g. on a host or in Docker) and connect clients via URL.
+Run the Basecamp MCP server over HTTP for hosted deployments.
+
+Exposes:
+  - SSE (Server-Sent Events) for clients like Cursor — typically GET /sse
+  - Streamable HTTP for clients like OpenAI Codex — typically POST/GET /mcp
 
 Environment:
   MCP_HOST  - Bind address (default: 0.0.0.0)
   MCP_PORT  - Port (default: 8010)
+  MCP_ENABLE_STREAMABLE_HTTP - If "true"/"1"/"yes" (default), mount Streamable HTTP at MCP_STREAMABLE_HTTP_PATH (default /mcp). Set "false" to serve SSE only.
+  MCP_STREAMABLE_HTTP_PATH - Optional override for Streamable HTTP path (default /mcp).
 
 Example:
   python run_mcp_server_sse.py
@@ -144,6 +148,43 @@ def _friendly_messages_fallback(app):
     return wrapper
 
 
+def build_mcp_asgi_app(port: int):
+    """
+    Build the ASGI application (SSE + optional Streamable HTTP) with auth and host middleware.
+
+    Returns:
+        ASGI callable suitable for uvicorn.
+    """
+    from starlette.applications import Starlette
+
+    _raw_stream = os.environ.get("MCP_ENABLE_STREAMABLE_HTTP")
+    if _raw_stream is None:
+        enable_stream = True
+    else:
+        enable_stream = _raw_stream.strip().lower() in ("1", "true", "yes")
+    stream_path_override = os.environ.get("MCP_STREAMABLE_HTTP_PATH", "").strip()
+    if stream_path_override:
+        mcp.settings.streamable_http_path = stream_path_override
+
+    sse_app = mcp.sse_app(mount_path="/")
+
+    if enable_stream:
+        stream_app = mcp.streamable_http_app()
+        combined_routes = list(sse_app.routes) + list(stream_app.routes)
+        inner = Starlette(
+            debug=mcp.settings.debug,
+            routes=combined_routes,
+            lifespan=lambda app: mcp.session_manager.run(),
+        )
+    else:
+        inner = sse_app
+
+    app = _auth_middleware(inner)
+    app = _friendly_messages_fallback(app)
+    app = _allow_all_hosts(app, port)
+    return app
+
+
 def main():
     try:
         import uvicorn
@@ -164,23 +205,36 @@ def main():
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8010"))
 
-    # sse_app() returns a Starlette ASGI app; MCP SSE is usually at /
-    app = mcp.sse_app(mount_path="/")
-    # Resolve Bearer API key to user_id and set request-scoped context for tools
-    app = _auth_middleware(app)
-    # Friendly response for GET /messages in browser (instead of "Invalid Content-Type header")
-    app = _friendly_messages_fallback(app)
-    # Wrap so requests to http://192.168.x.x:8010/ etc. don't get "invalid host header"
-    app = _allow_all_hosts(app, port)
+    app = build_mcp_asgi_app(port)
+
+    _raw_stream = os.environ.get("MCP_ENABLE_STREAMABLE_HTTP")
+    if _raw_stream is None:
+        enable_stream = True
+    else:
+        enable_stream = _raw_stream.strip().lower() in ("1", "true", "yes")
+    stream_path = mcp.settings.streamable_http_path
+
     print(
-        f"Starting Basecamp MCP server (SSE) at http://{host}:{port}", file=sys.stderr
+        f"Starting Basecamp MCP server at http://{host}:{port}",
+        file=sys.stderr,
     )
     print(
-        f"Connect clients to: http://<this-host>:{port}/", file=sys.stderr
+        f"  SSE (e.g. Cursor): http://<this-host>:{port}{mcp.settings.sse_path}",
+        file=sys.stderr,
     )
+    if enable_stream:
+        print(
+            f"  Streamable HTTP (e.g. Codex): http://<this-host>:{port}{stream_path}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "  Streamable HTTP: disabled (MCP_ENABLE_STREAMABLE_HTTP=false)",
+            file=sys.stderr,
+        )
+
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
     main()
-
