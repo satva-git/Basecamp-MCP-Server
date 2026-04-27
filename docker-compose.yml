@@ -1,0 +1,73 @@
+version: "3.8"
+
+# Consolidated single-project deployment for Satva's Basecamp MCP.
+# - app:           the MCP tool server (basecamp_fastmcp.py over streamable-http)
+# - postgres_oauth: encrypted token store for the proxy (per-user OAuth tokens)
+# - oauth-proxy:    mcp-oauth-proxy fork with non-OIDC overrides for 37signals
+#
+# The proxy terminates the user's OAuth 2.0 flow against 37signals,
+# encrypts/stores the access+refresh tokens in postgres, and forwards each
+# MCP request to `app:9000` with the upstream Basecamp access token in the
+# `x-forwarded-access-token` header. The MCP app is never exposed publicly.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PORT: 9000
+      # mcp-oauth-proxy strips the /mcp resource prefix before forwarding,
+      # so the app must serve at /basecamp/ to receive requests. Trailing
+      # slash is mandatory: Starlette Mount would 307-redirect /basecamp ->
+      # /basecamp/ otherwise and the Location header would leak the
+      # internal Docker hostname (app:9000).
+      MCP_PATH: /basecamp/
+      MCP_TRANSPORT: streamable-http
+      USER_AGENT: ${USER_AGENT:-Basecamp MCP Server (ops@satvasolutions.com)}
+      BASECAMP_ACCOUNT_ID: ${BASECAMP_ACCOUNT_ID}
+    expose:
+      - "9000"
+
+  postgres_oauth:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: oauth_proxy
+      POSTGRES_USER: oauth_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-oauth_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+
+  oauth-proxy:
+    image: ghcr.io/satva-git/mcp-oauth-proxy:latest
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      DATABASE_DSN: "postgres://oauth_user:${POSTGRES_PASSWORD:-oauth_password}@postgres_oauth:5432/oauth_proxy?sslmode=disable"
+      # 37signals OAuth 2.0 — no OIDC discovery, so we set every endpoint manually.
+      # Authorize URL: https://launchpad.37signals.com/authorization/new?type=web_server&...
+      # Token URL:     https://launchpad.37signals.com/authorization/token?type=web_server
+      # Userinfo URL:  https://launchpad.37signals.com/authorization.json (returns identity + accounts)
+      OAUTH_AUTHORIZE_URL: "https://launchpad.37signals.com/authorization/new"
+      OAUTH_TOKEN_URL: "https://launchpad.37signals.com/authorization/token"
+      OAUTH_USERINFO_URL: "https://launchpad.37signals.com/authorization.json"
+      OAUTH_CLIENT_ID: ${BASECAMP_CLIENT_ID}
+      OAUTH_CLIENT_SECRET: ${BASECAMP_CLIENT_SECRET}
+      # 37signals requires `type=web_server` on /authorization/new + /authorization/token.
+      # mcp-oauth-proxy passes EXTRA_AUTHORIZE_PARAMS verbatim onto the authorize URL
+      # and EXTRA_TOKEN_PARAMS into the token-exchange POST body.
+      EXTRA_AUTHORIZE_PARAMS: "type=web_server"
+      EXTRA_TOKEN_PARAMS: "type=web_server"
+      SCOPES_SUPPORTED: ""
+      MCP_SERVER_URL: "http://app:9000"
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    depends_on:
+      - postgres_oauth
+      - app
+    expose:
+      - "8080"
+
+volumes:
+  postgres_data:
