@@ -169,6 +169,51 @@ async def _run_sync(func, *args, **kwargs):
     """Wrapper to run synchronous functions in thread pool."""
     return await anyio.to_thread.run_sync(func, *args, **kwargs)
 
+
+def _attachments_to_html(attachable_sgids: Optional[List[Any]]) -> str:
+    """Convert a list of attachable_sgids into Basecamp <bc-attachment> tags.
+
+    Each item may be either a plain string sgid, or a dict
+    {"sgid": "...", "caption": "..."}. Returns the concatenated HTML
+    fragment, or empty string if the list is empty/None.
+
+    Basecamp 3 renders <bc-attachment sgid="..."> inline in HTML bodies for
+    todos, messages, comments, documents, and cards. Without this tag the
+    uploaded file exists in the account but is not visible on the recording.
+    """
+    if not attachable_sgids:
+        return ""
+    parts: List[str] = []
+    for item in attachable_sgids:
+        if isinstance(item, dict):
+            sgid = item.get("sgid")
+            caption = item.get("caption")
+        else:
+            sgid = item
+            caption = None
+        if not sgid:
+            continue
+        if caption:
+            safe_caption = str(caption).replace('"', '&quot;')
+            parts.append(f'<bc-attachment sgid="{sgid}" caption="{safe_caption}"></bc-attachment>')
+        else:
+            parts.append(f'<bc-attachment sgid="{sgid}"></bc-attachment>')
+    return "".join(parts)
+
+
+def _merge_description_with_attachments(description: Optional[str], attachable_sgids: Optional[List[Any]]) -> Optional[str]:
+    """Append attachment HTML to a description, returning the merged HTML.
+
+    Returns None only if BOTH description and attachable_sgids are empty.
+    """
+    attachments_html = _attachments_to_html(attachable_sgids)
+    if not attachments_html:
+        return description
+    if description:
+        return description + attachments_html
+    return attachments_html
+
+
 # Core MCP Tools - Starting with essential ones from original server
 
 @mcp.tool()
@@ -361,18 +406,25 @@ async def get_todo(project_id: str, todo_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def create_todo(project_id: str, todolist_id: str, content: str, 
-                     description: Optional[str] = None, 
+async def create_todo(project_id: str, todolist_id: str, content: str,
+                     description: Optional[str] = None,
                      assignee_ids: Optional[List[str]] = None,
-                     completion_subscriber_ids: Optional[List[str]] = None, 
-                     notify: bool = False, 
-                     due_on: Optional[str] = None, 
-                     starts_on: Optional[str] = None) -> Dict[str, Any]:
+                     completion_subscriber_ids: Optional[List[str]] = None,
+                     notify: bool = False,
+                     due_on: Optional[str] = None,
+                     starts_on: Optional[str] = None,
+                     attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Create a new to-do item in a to-do list.
 
     IMPORTANT: This creates a to-do (task) inside a to-do list, NOT a message.
     Use create_message() to post announcements/discussions on the Message Board.
     Use create_comment() to add a comment/reply on an existing to-do or message.
+
+    To attach images/files to the to-do, follow this two-step flow:
+      1. Call create_attachment(file_content_b64, name, content_type) for each
+         file. Capture the returned attachable_sgid from the response.
+      2. Pass those sgids here as attachable_sgids. They will be embedded into
+         the description as <bc-attachment> tags so Basecamp renders them inline.
 
     Args:
         project_id: Project ID
@@ -384,11 +436,17 @@ async def create_todo(project_id: str, todolist_id: str, content: str,
         notify: Whether to notify assignees
         due_on: Due date in YYYY-MM-DD format
         starts_on: Start date in YYYY-MM-DD format
+        attachable_sgids: List of attachable_sgid strings from create_attachment calls,
+            or list of {"sgid": "...", "caption": "..."} dicts. These are appended
+            to the description as <bc-attachment> tags so the files render inline
+            on the to-do.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
+    description = _merge_description_with_attachments(description, attachable_sgids)
+
     try:
         # Use lambda to properly handle keyword arguments
         todo = await _run_sync(
@@ -420,16 +478,24 @@ async def create_todo(project_id: str, todolist_id: str, content: str,
         }
 
 @mcp.tool()
-async def update_todo(project_id: str, todo_id: str, 
+async def update_todo(project_id: str, todo_id: str,
                      content: Optional[str] = None,
-                     description: Optional[str] = None, 
+                     description: Optional[str] = None,
                      assignee_ids: Optional[List[str]] = None,
                      completion_subscriber_ids: Optional[List[str]] = None,
                      notify: Optional[bool] = None,
-                     due_on: Optional[str] = None, 
-                     starts_on: Optional[str] = None) -> Dict[str, Any]:
+                     due_on: Optional[str] = None,
+                     starts_on: Optional[str] = None,
+                     attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Update an existing todo item.
-    
+
+    To add file/image attachments, upload them via create_attachment() first,
+    then pass the returned attachable_sgids here. They will be embedded as
+    <bc-attachment> tags appended to the description HTML.
+
+    NOTE: Basecamp's update endpoint replaces the description, so include the
+    existing description text along with any new attachments to preserve content.
+
     Args:
         project_id: Project ID
         todo_id: The todo ID
@@ -448,11 +514,12 @@ async def update_todo(project_id: str, todo_id: str,
         # Guard against no-op updates
         if all(v is None for v in [content, description, assignee_ids,
                                    completion_subscriber_ids, notify,
-                                   due_on, starts_on]):
+                                   due_on, starts_on, attachable_sgids]):
             return {
                 "error": "Invalid input",
                 "message": "At least one field to update must be provided"
             }
+        description = _merge_description_with_attachments(description, attachable_sgids)
         # Use lambda to properly handle keyword arguments
         todo = await _run_sync(
             lambda: client.update_todo(
@@ -705,7 +772,8 @@ async def get_comments(recording_id: str, project_id: str, page: int = 1) -> Dic
         }
 
 @mcp.tool()
-async def create_comment(recording_id: str, project_id: str, content: str) -> Dict[str, Any]:
+async def create_comment(recording_id: str, project_id: str, content: str,
+                         attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Create a comment on any Basecamp recording — including to-dos, messages, documents, and other items.
 
     Use this tool to add a comment/reply to an existing to-do item, message thread, document, or any
@@ -716,14 +784,22 @@ async def create_comment(recording_id: str, project_id: str, content: str) -> Di
     - Reply to a message thread: pass the message's ID as recording_id
     - Comment on a document: pass the document's ID as recording_id
 
+    To include image/file attachments, upload each via create_attachment() first
+    to get an attachable_sgid, then pass them via attachable_sgids. They will be
+    embedded as <bc-attachment> tags appended to the comment content.
+
     Args:
         recording_id: The ID of the to-do, message, document, or other Basecamp item to comment on
         project_id: The project ID (also called bucket ID) that contains the item
         content: The comment content in HTML format (e.g. '<p>Looks good!</p>')
+        attachable_sgids: Optional list of attachable_sgid strings (or {"sgid","caption"} dicts)
+            from create_attachment. Each renders as a <bc-attachment> tag inline.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
+
+    content = _merge_description_with_attachments(content, attachable_sgids) or content
 
     try:
         comment = await _run_sync(client.create_comment, recording_id, project_id, content)
@@ -947,7 +1023,8 @@ async def get_message_categories(project_id: str) -> Dict[str, Any]:
 @mcp.tool()
 async def create_message(project_id: str, subject: str, content: str,
                          message_board_id: Optional[str] = None,
-                         category_id: Optional[str] = None) -> Dict[str, Any]:
+                         category_id: Optional[str] = None,
+                         attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Create a new message (announcement/discussion thread) on a project's Message Board in Basecamp.
 
     IMPORTANT: This creates a Message Board post (like an announcement or discussion thread), NOT a to-do item.
@@ -957,16 +1034,24 @@ async def create_message(project_id: str, subject: str, content: str,
     and body content, similar to an email or forum post. They appear under the "Message Board" section
     of a Basecamp project.
 
+    To include image/file attachments, upload each via create_attachment() first to get an
+    attachable_sgid, then pass them via attachable_sgids. They will be embedded as
+    <bc-attachment> tags appended to the message content.
+
     Args:
         project_id: The project ID
         subject: Message title/subject line (required — this is the thread title)
         content: Message body in HTML format (e.g. '<p>Here is the update...</p>')
         message_board_id: Optional message board ID. If not provided, will be auto-discovered from the project.
         category_id: Optional message type/category ID (use get_message_categories to find available types)
+        attachable_sgids: Optional list of attachable_sgid strings (or {"sgid","caption"} dicts)
+            from create_attachment. Each renders as a <bc-attachment> tag inline.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
+
+    content = _merge_description_with_attachments(content, attachable_sgids) or content
 
     try:
         message = await _run_sync(
@@ -1310,9 +1395,14 @@ async def get_cards(project_id: str, column_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def create_card(project_id: str, column_id: str, title: str, content: Optional[str] = None, due_on: Optional[str] = None, notify: bool = False) -> Dict[str, Any]:
+async def create_card(project_id: str, column_id: str, title: str, content: Optional[str] = None, due_on: Optional[str] = None, notify: bool = False,
+                     attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Create a new card in a column.
-    
+
+    To include image/file attachments, upload each via create_attachment() first
+    to get an attachable_sgid, then pass them via attachable_sgids. They will be
+    embedded as <bc-attachment> tags appended to the card content.
+
     Args:
         project_id: The project ID
         column_id: The column ID
@@ -1320,11 +1410,15 @@ async def create_card(project_id: str, column_id: str, title: str, content: Opti
         content: Optional card content/description
         due_on: Optional due date (ISO 8601 format)
         notify: Whether to notify assignees (default: false)
+        attachable_sgids: Optional list of attachable_sgid strings (or {"sgid","caption"} dicts)
+            from create_attachment. Each renders as a <bc-attachment> tag inline.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
+    content = _merge_description_with_attachments(content, attachable_sgids)
+
     try:
         card = await _run_sync(client.create_card, project_id, column_id, title, content, due_on, notify)
         return {
@@ -2070,15 +2164,36 @@ async def uncomplete_card_step(project_id: str, step_id: str) -> Dict[str, Any]:
 # Attachments, Events, and Webhooks
 @mcp.tool()
 async def create_attachment(file_content_b64: str, name: str, content_type: Optional[str] = None) -> Dict[str, Any]:
-    """Upload a file as an attachment to Basecamp.
+    """Upload a file to Basecamp's attachments endpoint and return an attachable_sgid.
 
-    The returned attachable_sgid can be embedded in document or message content
-    using Basecamp's rich-text attachment syntax.
+    This is STEP 1 of attaching a file. The upload alone does not associate the
+    file with any to-do, message, document, comment, or card — it only puts the
+    bytes in Basecamp's attachment store. To make the file appear on a recording
+    you must complete STEP 2:
+
+      STEP 2: Pass the returned `attachable_sgid` (from response.attachment.attachable_sgid)
+              to a creation tool's `attachable_sgids` parameter, e.g.:
+                create_todo(..., attachable_sgids=["<sgid_from_step_1>"])
+                create_message(..., attachable_sgids=[...])
+                create_comment(..., attachable_sgids=[...])
+                create_card(..., attachable_sgids=[...])
+                create_document(..., attachable_sgids=[...])
+                update_todo(..., attachable_sgids=[...])
+                update_document(..., attachable_sgids=[...])
+
+    Without STEP 2 the file will exist in the account but will not be visible
+    on any to-do or message — this is the most common cause of "image
+    didn't attach" issues.
+
+    If you have a file URL instead of bytes, use create_attachment_from_url()
+    which fetches the URL and performs the upload in one call.
 
     Args:
         file_content_b64: Base64-encoded file content (encode your file bytes as base64 before calling)
-        name: Filename for Basecamp (e.g. "report.pdf")
-        content_type: MIME type of the file (e.g. "application/pdf", "image/png"). Defaults to application/octet-stream.
+        name: Filename for Basecamp (e.g. "screenshot.png", "report.pdf")
+        content_type: MIME type (e.g. "image/png", "image/jpeg", "application/pdf").
+            Defaults to application/octet-stream — set this correctly for images
+            so Basecamp renders them inline.
     """
     client = _get_basecamp_client()
     if not client:
@@ -2088,7 +2203,8 @@ async def create_attachment(file_content_b64: str, name: str, content_type: Opti
         result = await _run_sync(client.create_attachment, file_content_b64, name, content_type or "application/octet-stream")
         return {
             "status": "success",
-            "attachment": result
+            "attachment": result,
+            "next_step": "Pass result.attachment.attachable_sgid into attachable_sgids on create_todo / create_message / create_comment / create_card / create_document so the file actually appears on a recording.",
         }
     except Exception as e:
         logger.error(f"Error creating attachment: {e}")
@@ -2101,6 +2217,61 @@ async def create_attachment(file_content_b64: str, name: str, content_type: Opti
             "error": "Execution error",
             "message": str(e)
         }
+
+
+@mcp.tool()
+async def create_attachment_from_url(url: str, name: Optional[str] = None, content_type: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch a file from a URL and upload it to Basecamp's attachments endpoint in one call.
+
+    Convenience wrapper around create_attachment for the common case where the
+    AI has a URL (e.g. an image link) instead of raw file bytes. The HTTP
+    response's Content-Type is used as the upload type when content_type is not
+    provided. Returns the same attachable_sgid that create_attachment returns,
+    which you must then pass to a creation tool's attachable_sgids parameter
+    (see create_attachment for the full STEP 2 list).
+
+    Args:
+        url: HTTP(S) URL of the file to fetch and upload (must be reachable from this server).
+        name: Filename to store as in Basecamp. If omitted, the URL's basename is used.
+        content_type: MIME type override. If omitted, taken from the response's
+            Content-Type header, falling back to application/octet-stream.
+    """
+    client = _get_basecamp_client()
+    if not client:
+        return _get_auth_error_response()
+
+    import base64
+    from urllib.parse import urlparse
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as http:
+            resp = await http.get(url)
+            if resp.status_code != 200:
+                return {"error": "Fetch failed", "message": f"GET {url} returned HTTP {resp.status_code}"}
+            data = resp.content
+            detected_ct = resp.headers.get("Content-Type", "").split(";")[0].strip() or "application/octet-stream"
+
+        effective_name = name or (urlparse(url).path.rsplit("/", 1)[-1] or "attachment")
+        effective_ct = content_type or detected_ct
+        b64 = base64.b64encode(data).decode("ascii")
+
+        result = await _run_sync(client.create_attachment, b64, effective_name, effective_ct)
+        return {
+            "status": "success",
+            "attachment": result,
+            "fetched_bytes": len(data),
+            "content_type_used": effective_ct,
+            "next_step": "Pass result.attachment.attachable_sgid into attachable_sgids on create_todo / create_message / create_comment / create_card / create_document so the file actually appears on a recording.",
+        }
+    except Exception as e:
+        logger.error(f"Error in create_attachment_from_url: {e}")
+        if "401" in str(e) and "expired" in str(e).lower():
+            return {
+                "error": "OAuth token expired",
+                "message": "Your Basecamp OAuth token expired during the API call. Please re-authenticate by visiting http://localhost:8000 and completing the OAuth flow again."
+            }
+        return {"error": "Execution error", "message": str(e)}
+
 
 @mcp.tool()
 async def get_events(project_id: str, recording_id: str) -> Dict[str, Any]:
@@ -2287,19 +2458,28 @@ async def get_document(project_id: str, document_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def create_document(project_id: str, vault_id: str, title: str, content: str) -> Dict[str, Any]:
+async def create_document(project_id: str, vault_id: str, title: str, content: str,
+                          attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Create a document in a vault.
-    
+
+    To embed image/file attachments inline, upload each via create_attachment()
+    first to get an attachable_sgid, then pass them via attachable_sgids.
+    They will be embedded as <bc-attachment> tags appended to the content.
+
     Args:
         project_id: Project ID
         vault_id: Vault ID
         title: Document title
         content: Document HTML content
+        attachable_sgids: Optional list of attachable_sgid strings (or {"sgid","caption"} dicts)
+            from create_attachment. Each renders as a <bc-attachment> tag inline.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
+    content = _merge_description_with_attachments(content, attachable_sgids) or content
+
     try:
         doc = await _run_sync(client.create_document, project_id, vault_id, title, content)
         return {
@@ -2319,19 +2499,31 @@ async def create_document(project_id: str, vault_id: str, title: str, content: s
         }
 
 @mcp.tool()
-async def update_document(project_id: str, document_id: str, title: Optional[str] = None, content: Optional[str] = None) -> Dict[str, Any]:
+async def update_document(project_id: str, document_id: str, title: Optional[str] = None, content: Optional[str] = None,
+                          attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Update a document.
-    
+
+    To add image/file attachments, upload each via create_attachment() first
+    to get an attachable_sgid, then pass them via attachable_sgids. They will
+    be embedded as <bc-attachment> tags appended to the content.
+
+    NOTE: Basecamp's update endpoint replaces the content, so include the
+    existing content along with any new attachments to preserve the document.
+
     Args:
         project_id: Project ID
         document_id: Document ID
         title: New title
         content: New HTML content
+        attachable_sgids: Optional list of attachable_sgid strings (or {"sgid","caption"} dicts)
+            from create_attachment. Each renders as a <bc-attachment> tag inline.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
+    content = _merge_description_with_attachments(content, attachable_sgids)
+
     try:
         doc = await _run_sync(client.update_document, project_id, document_id, title, content)
         return {
