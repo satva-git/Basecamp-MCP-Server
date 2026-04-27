@@ -102,6 +102,48 @@ Basecamp organizes documents in vaults (folders). Navigate the hierarchy first:
 - get_daily_check_ins, get_question_answers, get_events, get_uploads, create_attachment
 - get_webhooks, create_webhook, delete_webhook
 
+## Attaching files & images (READ THIS BEFORE ATTACHING ANYTHING)
+Basecamp uses a strict TWO-STEP flow. You CANNOT pass a file path, URL, or base64 blob
+directly to create_todo / create_message / etc. — those tools only accept an
+`attachable_sgid` (an opaque ID returned by an upload tool).
+
+Step 1 — Upload the file to get an `attachable_sgid`:
+- `create_attachment_from_url(url, name=None, content_type=None)` — when you have a public/HTTP URL.
+- `create_attachment(file_content_b64, name, content_type)` — when you have raw bytes (base64-encoded).
+Both return `result.attachment.attachable_sgid`.
+
+Step 2 — Pass the sgid into the `attachable_sgids=[...]` parameter of one of these creation/update tools:
+- `create_todo`, `update_todo`
+- `create_message`
+- `create_comment`
+- `create_card`
+- `create_document`, `update_document`
+
+The sgid is rendered as a `<bc-attachment sgid="...">` tag inline in the recording's HTML body.
+Skipping Step 2 leaves the file uploaded but invisible on any recording. Items in
+`attachable_sgids` may be plain sgid strings or `{"sgid": "...", "caption": "..."}` dicts.
+
+## Attaching files & images (READ THIS BEFORE ATTACHING ANYTHING)
+Basecamp uses a strict TWO-STEP flow. You CANNOT pass a file path, URL, or base64 blob
+directly to create_todo / create_message / etc. — those tools only accept an
+`attachable_sgid` (an opaque ID returned by an upload tool).
+
+Step 1 — Upload the file to get an `attachable_sgid`:
+- `create_attachment_from_url(url, name=None, content_type=None)` — when you have a public/HTTP URL.
+- `create_attachment(file_content_b64, name, content_type)` — when you have raw bytes (base64-encoded).
+Both return `result.attachment.attachable_sgid`.
+
+Step 2 — Pass the sgid into the `attachable_sgids=[...]` parameter of one of these creation/update tools:
+- `create_todo`, `update_todo`
+- `create_message`
+- `create_comment`
+- `create_card`
+- `create_document`, `update_document`
+
+The sgid renders as a `<bc-attachment sgid="...">` tag inline in the recording's HTML body.
+Skipping Step 2 leaves the file uploaded but invisible on any recording. Items in
+`attachable_sgids` may be plain sgid strings or `{"sgid": "...", "caption": "..."}` dicts.
+
 ## Important Behaviors
 - **Safe deletions**: All delete/trash operations archive items instead of permanently deleting them. Archived items remain recoverable via the Basecamp web UI.
 - **Pagination**: List endpoints return paginated results; the server fetches all pages automatically.
@@ -489,11 +531,14 @@ async def update_todo(project_id: str, todo_id: str,
                      attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Update an existing todo item.
 
-    To add file/image attachments, upload them via create_attachment() first,
-    then pass the returned attachable_sgids here. They will be embedded as
-    <bc-attachment> tags appended to the description HTML.
+    To add file/image attachments, follow the standard two-step flow:
+      1. Call create_attachment_from_url(url) (for a URL) or
+         create_attachment(file_content_b64, name, content_type) (for raw bytes)
+         and capture the returned attachable_sgid.
+      2. Pass those sgids here as attachable_sgids — they are appended to the
+         description as <bc-attachment> tags so Basecamp renders them inline.
 
-    NOTE: Basecamp's update endpoint replaces the description, so include the
+    NOTE: Basecamp's update endpoint REPLACES the description, so include the
     existing description text along with any new attachments to preserve content.
 
     Args:
@@ -505,6 +550,9 @@ async def update_todo(project_id: str, todo_id: str,
         completion_subscriber_ids: List of person IDs to notify on completion
         due_on: Due date in YYYY-MM-DD format
         starts_on: Start date in YYYY-MM-DD format
+        attachable_sgids: List of attachable_sgid strings from create_attachment /
+            create_attachment_from_url, or {"sgid","caption"} dicts. Appended to
+            description as <bc-attachment> tags.
     """
     client = _get_basecamp_client()
     if not client:
@@ -1399,9 +1447,11 @@ async def create_card(project_id: str, column_id: str, title: str, content: Opti
                      attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Create a new card in a column.
 
-    To include image/file attachments, upload each via create_attachment() first
-    to get an attachable_sgid, then pass them via attachable_sgids. They will be
-    embedded as <bc-attachment> tags appended to the card content.
+    To include image/file attachments, follow the two-step flow:
+      1. Upload via create_attachment_from_url(url) or create_attachment(file_content_b64, name, content_type)
+         and capture result.attachment.attachable_sgid.
+      2. Pass those sgids here as attachable_sgids. They are appended to the
+         content as <bc-attachment> tags so Basecamp renders them inline on the card.
 
     Args:
         project_id: The project ID
@@ -2503,11 +2553,13 @@ async def update_document(project_id: str, document_id: str, title: Optional[str
                           attachable_sgids: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Update a document.
 
-    To add image/file attachments, upload each via create_attachment() first
-    to get an attachable_sgid, then pass them via attachable_sgids. They will
-    be embedded as <bc-attachment> tags appended to the content.
+    To add image/file attachments, follow the two-step flow:
+      1. Upload via create_attachment_from_url(url) or create_attachment(file_content_b64, name, content_type)
+         and capture result.attachment.attachable_sgid.
+      2. Pass those sgids here as attachable_sgids — they are appended to the
+         content as <bc-attachment> tags so Basecamp renders them inline.
 
-    NOTE: Basecamp's update endpoint replaces the content, so include the
+    NOTE: Basecamp's update endpoint REPLACES the content, so include the
     existing content along with any new attachments to preserve the document.
 
     Args:
