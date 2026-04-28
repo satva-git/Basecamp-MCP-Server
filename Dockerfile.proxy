@@ -1,0 +1,21 @@
+FROM golang:1.25-alpine AS builder
+
+ARG PROXY_REF=main
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /src
+RUN git clone https://github.com/satva-git/mcp-oauth-proxy.git . \
+    && git checkout "${PROXY_REF}" \
+    && go mod tidy \
+    && CGO_ENABLED=0 go build -ldflags="-s -w" -o /oauth-proxy .
+
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates tzdata && apk upgrade --no-cache
+RUN addgroup -g 1001 -S oauth && adduser -u 1001 -S oauth -G oauth
+WORKDIR /app
+COPY --from=builder /oauth-proxy /app/oauth-proxy
+RUN chown -R oauth:oauth /app
+USER oauth
+EXPOSE 8080
+CMD ["/app/oauth-proxy"]
