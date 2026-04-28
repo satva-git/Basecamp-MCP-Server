@@ -12,20 +12,14 @@ import sys
 from typing import Any, Dict, List, Optional
 import anyio
 import httpx
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_headers
+from fastmcp.exceptions import ToolError
 
 # Import existing business logic
 from basecamp_client import BasecampClient
 from search_utils import BasecampSearch
-import token_storage
-import auth_manager
 from dotenv import load_dotenv
-
-# Multi-user: when running over SSE, run_mcp_server_sse sets request-scoped user_id
-try:
-    import mcp_auth_context
-except ImportError:
-    mcp_auth_context = None
 
 # Determine project root (directory containing this script)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -153,58 +147,75 @@ Skipping Step 2 leaves the file uploaded but invisible on any recording. Items i
 """
 )
 
-# Auth helper functions (multi-user aware when run over SSE)
-def _get_request_user_id() -> Optional[str]:
-    """Return request-scoped user_id when running over SSE; None for stdio or single-user."""
-    if mcp_auth_context is not None:
-        return mcp_auth_context.get_user_id_for_request()
-    return None
+# Auth: per-request access token forwarded by mcp-oauth-proxy.
+# The proxy validates the user's session (against 37signals via OAuth 2.0)
+# and forwards the upstream Basecamp access token in the
+# `x-forwarded-access-token` header for each MCP tool call.
+def _get_access_token() -> Optional[str]:
+    """Return the per-request Basecamp access token from the proxy header."""
+    try:
+        headers = get_http_headers()
+    except Exception:
+        return None
+    return headers.get("x-forwarded-access-token")
+
+
+def _account_id_from_token(access_token: str) -> Optional[str]:
+    """Resolve Basecamp account_id from /authorization.json.
+
+    Falls back to BASECAMP_ACCOUNT_ID env var if the call fails or the
+    user's identity has no Basecamp 3 accounts. Cached on the BasecampClient
+    side; this helper is only called when constructing a fresh client.
+    """
+    env_account = os.getenv('BASECAMP_ACCOUNT_ID')
+    try:
+        resp = httpx.get(
+            "https://launchpad.37signals.com/authorization.json",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": os.getenv("USER_AGENT", "Basecamp MCP Server (ops@satvasolutions.com)"),
+            },
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for acct in data.get("accounts", []):
+                if acct.get("product") == "bc3":
+                    return str(acct.get("id"))
+    except Exception as e:
+        logger.warning("Failed to resolve account_id from /authorization.json: %s", e)
+    return env_account
+
 
 def _get_basecamp_client() -> Optional[BasecampClient]:
-    """Get authenticated Basecamp client. Uses per-user token when user_id is set (SSE)."""
-    try:
-        user_id = _get_request_user_id()
-        token_data = token_storage.get_token(user_id=user_id)
-        logger.debug("Token data retrieved for user_id=%s", user_id)
-
-        if not token_data or not token_data.get('access_token'):
-            logger.error("No OAuth token available")
-            return None
-
-        if not auth_manager.ensure_authenticated(user_id=user_id):
-            logger.error("OAuth token has expired and automatic refresh failed")
-            return None
-
-        token_data = token_storage.get_token(user_id=user_id)
-        account_id = token_data.get('account_id') or os.getenv('BASECAMP_ACCOUNT_ID')
-        user_agent = os.getenv('USER_AGENT') or "Basecamp MCP Server (cursor@example.com)"
-
-        if not account_id:
-            logger.error("Missing account_id. Token data: %s, Env BASECAMP_ACCOUNT_ID: %s", token_data, os.getenv('BASECAMP_ACCOUNT_ID'))
-            return None
-
-        logger.debug("Creating Basecamp client with account_id: %s, user_agent: %s", account_id, user_agent)
-        return BasecampClient(
-            access_token=token_data['access_token'],
-            account_id=account_id,
-            user_agent=user_agent,
-            auth_mode='oauth'
-        )
-    except Exception as e:
-        logger.error("Error creating Basecamp client: %s", e)
+    """Build a Basecamp client from the per-request forwarded access token."""
+    access_token = _get_access_token()
+    if not access_token:
+        logger.error("No x-forwarded-access-token header on request")
         return None
+    account_id = _account_id_from_token(access_token)
+    if not account_id:
+        logger.error("Could not resolve Basecamp account_id (env BASECAMP_ACCOUNT_ID unset and /authorization.json had no bc3 accounts)")
+        return None
+    user_agent = os.getenv('USER_AGENT') or "Basecamp MCP Server (ops@satvasolutions.com)"
+    return BasecampClient(
+        access_token=access_token,
+        account_id=account_id,
+        user_agent=user_agent,
+        auth_mode='oauth',
+    )
+
 
 def _get_auth_error_response() -> Dict[str, Any]:
-    """Return consistent auth error response (uses request user_id when in SSE mode)."""
-    user_id = _get_request_user_id()
-    if token_storage.is_token_expired(user_id=user_id):
+    """Return consistent auth error response."""
+    if not _get_access_token():
         return {
-            "error": "OAuth token expired",
-            "message": "Your Basecamp OAuth token has expired. Please re-authenticate by visiting the OAuth app and completing the flow again."
+            "error": "Authentication required",
+            "message": "No Basecamp access token forwarded by the OAuth proxy. The user needs to complete the OAuth flow against this MCP server.",
         }
     return {
-        "error": "Authentication required",
-        "message": "Please authenticate with Basecamp first (visit the OAuth app to link your account and get an API key)."
+        "error": "Basecamp account resolution failed",
+        "message": "An access token was forwarded but no Basecamp 3 account is associated with it. Verify BASECAMP_ACCOUNT_ID or that the user has access to the expected Basecamp account.",
     }
 
 async def _run_sync(func, *args, **kwargs):
@@ -3155,7 +3166,29 @@ async def search_people(name: str, project_id: Optional[str] = None) -> Dict[str
         return {"error": "Execution error", "message": str(e)}
 
 
+PORT = int(os.getenv("PORT", "9000"))
+MCP_PATH = os.getenv("MCP_PATH", "/basecamp/")
+
+
+def streamable_http_server():
+    """Hosted entry point: serve Streamable HTTP behind mcp-oauth-proxy."""
+    logger.info("Starting Basecamp FastMCP over Streamable HTTP on :%s%s", PORT, MCP_PATH)
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=PORT,
+        path=MCP_PATH,
+    )
+
+
+def stdio_server():
+    """Local CLI entry point (Cursor / Claude Desktop)."""
+    logger.info("Starting Basecamp FastMCP over stdio")
+    mcp.run()
+
+
 if __name__ == "__main__":
-    logger.info("Starting Basecamp FastMCP server")
-    # Run using official MCP stdio transport
-    mcp.run(transport='stdio') 
+    if os.getenv("MCP_TRANSPORT", "stdio").lower() in ("http", "streamable-http", "sse"):
+        streamable_http_server()
+    else:
+        stdio_server() 
