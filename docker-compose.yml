@@ -61,11 +61,13 @@ services:
       OAUTH_CLIENT_ID: ${BASECAMP_CLIENT_ID}
       OAUTH_CLIENT_SECRET: ${BASECAMP_CLIENT_SECRET}
       # 37signals requires `type=web_server` on /authorization/new + /authorization/token.
-      # mcp-oauth-proxy passes EXTRA_AUTHORIZE_PARAMS verbatim onto the authorize URL
-      # and EXTRA_TOKEN_PARAMS into the token-exchange POST body.
-      EXTRA_AUTHORIZE_PARAMS: "type=web_server"
-      EXTRA_TOKEN_PARAMS: "type=web_server"
-      SCOPES_SUPPORTED: ""
+      # mcp-oauth-proxy reads OAUTH_EXTRA_AUTHORIZE_PARAMS verbatim onto the
+      # authorize URL and OAUTH_EXTRA_TOKEN_PARAMS into the token-exchange POST body.
+      OAUTH_EXTRA_AUTHORIZE_PARAMS: "type=web_server"
+      OAUTH_EXTRA_TOKEN_PARAMS: "type=web_server"
+      # 37signals doesn't honor OAuth scopes, but the proxy CLI requires a
+      # non-empty scopes-supported value at startup; placeholder is fine.
+      SCOPES_SUPPORTED: "basecamp"
       MCP_SERVER_URL: "http://app:9000"
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
     depends_on:
