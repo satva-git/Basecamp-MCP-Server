@@ -41,7 +41,12 @@ services:
       - "5432"
 
   oauth-proxy:
-    image: ghcr.io/satva-git/mcp-oauth-proxy:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+      # Pin the proxy fork by commit SHA, branch, or tag. Defaults to main.
+      args:
+        PROXY_REF: ${PROXY_REF:-main}
     environment:
       HOST: "0.0.0.0"
       PORT: "8080"
