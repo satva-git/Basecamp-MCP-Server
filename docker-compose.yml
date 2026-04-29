@@ -22,7 +22,7 @@ services:
       # slash is mandatory: Starlette Mount would 307-redirect /basecamp ->
       # /basecamp/ otherwise and the Location header would leak the
       # internal Docker hostname (app:9000).
-      MCP_PATH: /basecamp/
+      MCP_PATH: /mcp/basecamp/
       MCP_TRANSPORT: streamable-http
       USER_AGENT: ${USER_AGENT:-Basecamp MCP Server (ops@satvasolutions.com)}
       BASECAMP_ACCOUNT_ID: ${BASECAMP_ACCOUNT_ID}
