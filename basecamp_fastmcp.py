@@ -41,6 +41,7 @@ logger = logging.getLogger('basecamp_fastmcp')
 # Initialize FastMCP server
 mcp = FastMCP(
     "basecamp",
+    stateless_http=True,
     instructions="""This MCP server connects to Basecamp 3 and exposes 82 tools for managing projects, tasks, documents, and team communication.
 
 ## Authentication
