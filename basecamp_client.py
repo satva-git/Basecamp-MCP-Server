@@ -540,8 +540,15 @@ class BasecampClient:
             raise Exception(f"Failed to reposition todolist group: {response.status_code} - {response.text}")
 
     # People methods
-    def get_people(self):
-        """Get all people in the account (with pagination)."""
+    def get_people(self, max_pages=None, max_results=None):
+        """Get people in the account, paginated.
+
+        Args:
+            max_pages: stop after this many pages (default: all). Each page
+                is ~50 people. For accounts with thousands of people,
+                paging through everything is slow (10s+).
+            max_results: stop after this many people are accumulated.
+        """
         all_people = []
         page = 1
         while True:
@@ -550,15 +557,24 @@ class BasecampClient:
                 raise Exception(f"Failed to get people: {response.status_code} - {response.text}")
             page_people = response.json() or []
             all_people.extend(page_people)
+            if max_results is not None and len(all_people) >= max_results:
+                return all_people[:max_results]
             link_header = response.headers.get("Link", "")
             has_next = 'rel="next"' in link_header if link_header else False
             if not page_people or not has_next:
                 break
             page += 1
+            if max_pages is not None and page > max_pages:
+                break
         return all_people
 
-    def get_project_people(self, project_id):
-        """Get all people with access to a specific project (with pagination)."""
+    def get_project_people(self, project_id, max_pages=None, max_results=None):
+        """Get people with access to a project, paginated.
+
+        Args:
+            max_pages: stop after this many pages (default: all).
+            max_results: stop after this many people are accumulated.
+        """
         all_people = []
         page = 1
         while True:
@@ -567,11 +583,15 @@ class BasecampClient:
                 raise Exception(f"Failed to get project people: {response.status_code} - {response.text}")
             page_people = response.json() or []
             all_people.extend(page_people)
+            if max_results is not None and len(all_people) >= max_results:
+                return all_people[:max_results]
             link_header = response.headers.get("Link", "")
             has_next = 'rel="next"' in link_header if link_header else False
             if not page_people or not has_next:
                 break
             page += 1
+            if max_pages is not None and page > max_pages:
+                break
         return all_people
 
     # Campfire (chat) methods

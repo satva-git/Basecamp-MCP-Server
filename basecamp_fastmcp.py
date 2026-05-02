@@ -3499,25 +3499,36 @@ async def reposition_todolist_group(
 # People Management
 
 @mcp.tool()
-async def get_people(verbose: bool = False) -> Dict[str, Any]:
-    """Get all people in the Basecamp account (compact by default).
+async def get_people(verbose: bool = False, limit: int = 200) -> Dict[str, Any]:
+    """Get people in the Basecamp account (compact, paginated).
 
     Returns id, name, email per person — enough to look up person IDs for
-    assigning todos, cards, comments, etc. Use verbose=True for the full
-    Basecamp payload (avatar URLs, time_zone, employee, owner, ...).
+    assigning todos, cards, comments, etc. Stops paginating once `limit`
+    people have been collected so accounts with thousands of people stay
+    fast. Use verbose=True for the full Basecamp payload (avatar URLs,
+    time_zone, employee, owner, ...). Set limit=0 for the full sweep.
 
     Args:
         verbose: When True, returns full Basecamp person payloads.
+        limit: Stop after this many people (default 200). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
 
     try:
-        people = await _run_sync(client.get_people)
+        max_results = limit if limit and limit > 0 else None
+        people = await _run_sync(lambda: client.get_people(max_results=max_results))
+        truncated = bool(max_results and isinstance(people, list) and len(people) >= max_results)
         if not verbose:
             people = _person_briefs(people)
-        return {"status": "success", "count": len(people) if isinstance(people, list) else None, "data": people}
+        return {
+            "status": "success",
+            "count": len(people) if isinstance(people, list) else None,
+            "data": people,
+            "truncated": truncated,
+            "hint": "Use search_people(name) to find a specific person, or raise/zero `limit` for a full sweep." if truncated else None,
+        }
     except Exception as e:
         logger.error(f"Error getting people: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
@@ -3526,25 +3537,32 @@ async def get_people(verbose: bool = False) -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def get_project_people(project_id: str, verbose: bool = False) -> Dict[str, Any]:
-    """Get all people who have access to a specific project (compact by default).
+async def get_project_people(project_id: str, verbose: bool = False, limit: int = 200) -> Dict[str, Any]:
+    """Get people who have access to a project (compact, paginated).
 
     Use this to find who is on a project before assigning todos or cards.
-    Returns person IDs, names, and email addresses for everyone on the project.
 
     Args:
         project_id: The project ID to get people for
         verbose: When True, returns full Basecamp person payloads.
+        limit: Stop after this many people (default 200). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
 
     try:
-        people = await _run_sync(client.get_project_people, project_id)
+        max_results = limit if limit and limit > 0 else None
+        people = await _run_sync(lambda: client.get_project_people(project_id, max_results=max_results))
+        truncated = bool(max_results and isinstance(people, list) and len(people) >= max_results)
         if not verbose:
             people = _person_briefs(people)
-        return {"status": "success", "count": len(people) if isinstance(people, list) else None, "data": people}
+        return {
+            "status": "success",
+            "count": len(people) if isinstance(people, list) else None,
+            "data": people,
+            "truncated": truncated,
+        }
     except Exception as e:
         logger.error(f"Error getting project people: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
