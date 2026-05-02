@@ -327,34 +327,37 @@ async def get_project(project_id: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def search_basecamp(query: str, project_id: Optional[str] = None) -> Dict[str, Any]:
-    """Search across Basecamp projects, todos, and messages.
-    
+    """Search Basecamp. Fast by default; pass project_id to also search todos within that project.
+
+    Without project_id: filters the project list by name/description (cheap, ~1-2s).
+    With project_id: also searches todolists and todos inside that project.
+    For an exhaustive cross-project search of todos and messages, use `global_search`
+    instead — it can take a minute or more on accounts with many projects.
+
     Args:
         query: Search query
-        project_id: Optional project ID to limit search scope
+        project_id: Optional project ID. If set, also searches todolists/todos in that project.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         search = BasecampSearch(client=client)
-        results = {}
+        results: Dict[str, Any] = {
+            "projects": await _run_sync(search.search_projects, query),
+        }
 
         if project_id:
-            # Search within specific project
             results["todolists"] = await _run_sync(search.search_todolists, query, project_id)
             results["todos"] = await _run_sync(search.search_todos, query, project_id)
-        else:
-            # Search across all projects
-            results["projects"] = await _run_sync(search.search_projects, query)
-            results["todos"] = await _run_sync(search.search_todos, query)
-            results["messages"] = await _run_sync(search.search_messages, query)
 
         return {
             "status": "success",
             "query": query,
-            "results": results
+            "scope": "project" if project_id else "projects-only",
+            "results": results,
+            "hint": None if project_id else "Pass project_id to also search todos within a project, or use the global_search tool for an exhaustive cross-project search.",
         }
     except Exception as e:
         logger.error(f"Error searching Basecamp: {e}")
