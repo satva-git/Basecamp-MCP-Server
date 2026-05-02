@@ -47,6 +47,36 @@ mcp = FastMCP(
 ## Authentication
 OAuth tokens are managed automatically. If you receive an authentication error, the user must visit http://localhost:8000 to re-authenticate via OAuth.
 
+## Response shape (read this first — it controls how big each call is)
+
+Every list/get tool returns a **compact** response by default with only the
+fields needed to drive follow-up calls (id, name/title, status, app_url,
+people brief, etc.). Heavy fields like `bookmark_url`, full `dock` arrays,
+internal API URLs, full `creator/updater` objects, and HTML `content` bodies
+on list views are stripped.
+
+- `get_projects` returns `{id, name, status, purpose, app_url, tools}` per
+  project. The `tools` map (e.g. `{message_board: 8724419706, todoset: ...,
+  vault: ..., kanban_board: ...}`) gives you the IDs you need for follow-ups
+  without a second `get_project` call.
+- List tools (`get_todos`, `get_messages`, `get_documents`, `get_cards`,
+  `get_uploads`, `get_forwards`, `get_campfire_lines`) accept `limit` (default
+  50, 0=no cap) and report `total` + `truncated`. Increase only when needed.
+- Every compact tool accepts `verbose=True` to opt back into the raw
+  Basecamp payload — use sparingly, only when you actually need a stripped
+  field.
+- Single-item getters (`get_message`, `get_document`, `get_todo`) return
+  enough to read content; their list counterparts omit the body for speed.
+
+## Speed tips for the agent
+- Use `search_basecamp(query)` to find a project by name (~2s); pass
+  `project_id` to also scan that project's todos. Avoid `global_search`
+  unless the user explicitly wants an exhaustive cross-project sweep.
+- Resolve dock IDs from `get_projects().tools[...]` instead of calling
+  `get_project` again.
+- Default `limit=50` is plenty for an LLM context — only raise it if you
+  need to paginate beyond.
+
 ## Key Tool Categories
 
 ### Projects
@@ -268,21 +298,327 @@ def _merge_description_with_attachments(description: Optional[str], attachable_s
     return attachments_html
 
 
+# ---------------------------------------------------------------------------
+# Response slimming
+# ---------------------------------------------------------------------------
+# Basecamp's API returns very verbose objects (huge bookmark_url tokens, full
+# creator/updater objects, internal API URLs, etc.). For PM/dev MCP workflows
+# we only need essentials so the LLM can act: ids, names, status, app_url, and
+# enough relational fields to drive follow-up calls. Every list/get tool below
+# accepts `verbose: bool = False` — set True to get the raw Basecamp payload.
+# ---------------------------------------------------------------------------
+
+def _person_brief(p: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(p, dict):
+        return None
+    out = {"id": p.get("id"), "name": p.get("name")}
+    if p.get("email_address"):
+        out["email"] = p.get("email_address")
+    return out
+
+
+def _person_briefs(seq: Any) -> List[Dict[str, Any]]:
+    if not isinstance(seq, list):
+        return []
+    return [b for b in (_person_brief(p) for p in seq) if b]
+
+
+def slim_project(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact project record for PM/dev workflows.
+
+    Returns: id, name, status, purpose, app_url, and a flat `tools` map of
+    {dock_name: id} for every enabled dock entry (message_board, todoset,
+    vault, schedule, kanban_board, questionnaire, inbox, chat). The raw
+    `dock` array, bookmark_url, internal *_url fields are dropped.
+    """
+    if not isinstance(p, dict):
+        return p
+    tools: Dict[str, Any] = {}
+    for d in (p.get("dock") or []):
+        if isinstance(d, dict) and d.get("enabled") and d.get("name") and d.get("id") is not None:
+            tools[d["name"]] = d["id"]
+    out: Dict[str, Any] = {
+        "id": p.get("id"),
+        "name": p.get("name"),
+        "status": p.get("status"),
+        "purpose": p.get("purpose"),
+        "app_url": p.get("app_url"),
+    }
+    if tools:
+        out["tools"] = tools
+    return out
+
+
+def slim_todolist(tl: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(tl, dict):
+        return tl
+    return {
+        "id": tl.get("id"),
+        "title": tl.get("title") or tl.get("name"),
+        "completed": tl.get("completed"),
+        "completed_ratio": tl.get("completed_ratio"),
+        "app_url": tl.get("app_url"),
+    }
+
+
+def slim_todo(t: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(t, dict):
+        return t
+    out: Dict[str, Any] = {
+        "id": t.get("id"),
+        "title": t.get("title") or t.get("content"),
+        "completed": t.get("completed"),
+        "due_on": t.get("due_on"),
+        "starts_on": t.get("starts_on"),
+        "app_url": t.get("app_url"),
+    }
+    if t.get("assignees"):
+        out["assignees"] = _person_briefs(t.get("assignees"))
+    if t.get("comments_count"):
+        out["comments_count"] = t.get("comments_count")
+    return out
+
+
+def slim_message(m: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(m, dict):
+        return m
+    out: Dict[str, Any] = {
+        "id": m.get("id"),
+        "subject": m.get("subject") or m.get("title"),
+        "status": m.get("status"),
+        "created_at": m.get("created_at"),
+        "updated_at": m.get("updated_at"),
+        "app_url": m.get("app_url"),
+    }
+    if m.get("creator"):
+        out["creator"] = _person_brief(m.get("creator"))
+    if m.get("comments_count"):
+        out["comments_count"] = m.get("comments_count")
+    if m.get("category"):
+        c = m["category"]
+        if isinstance(c, dict):
+            out["category"] = {"id": c.get("id"), "name": c.get("name")}
+    # Keep content only on single-message fetches; list views get a snippet.
+    if m.get("content"):
+        out["content"] = m["content"]
+    return out
+
+
+def slim_message_list(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Like slim_message but drops `content` (full HTML body) for list views."""
+    if not isinstance(m, dict):
+        return m
+    out = slim_message(m)
+    out.pop("content", None)
+    return out
+
+
+def slim_document_list(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Like slim_document but drops `content` (full HTML body) for list views."""
+    if not isinstance(d, dict):
+        return d
+    out = {
+        "id": d.get("id"),
+        "title": d.get("title"),
+        "status": d.get("status"),
+        "created_at": d.get("created_at"),
+        "updated_at": d.get("updated_at"),
+        "app_url": d.get("app_url"),
+    }
+    if d.get("creator"):
+        out["creator"] = _person_brief(d.get("creator"))
+    return out
+
+
+def slim_document(d: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(d, dict):
+        return d
+    out: Dict[str, Any] = {
+        "id": d.get("id"),
+        "title": d.get("title"),
+        "status": d.get("status"),
+        "created_at": d.get("created_at"),
+        "updated_at": d.get("updated_at"),
+        "app_url": d.get("app_url"),
+    }
+    if d.get("creator"):
+        out["creator"] = _person_brief(d.get("creator"))
+    if d.get("content"):
+        out["content"] = d["content"]
+    return out
+
+
+def slim_vault(v: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(v, dict):
+        return v
+    return {
+        "id": v.get("id"),
+        "title": v.get("title"),
+        "documents_count": v.get("documents_count"),
+        "uploads_count": v.get("uploads_count"),
+        "vaults_count": v.get("vaults_count"),
+        "app_url": v.get("app_url"),
+    }
+
+
+def slim_upload(u: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(u, dict):
+        return u
+    out: Dict[str, Any] = {
+        "id": u.get("id"),
+        "title": u.get("title") or u.get("filename"),
+        "filename": u.get("filename"),
+        "content_type": u.get("content_type"),
+        "byte_size": u.get("byte_size"),
+        "created_at": u.get("created_at"),
+        "app_url": u.get("app_url"),
+    }
+    if u.get("creator"):
+        out["creator"] = _person_brief(u.get("creator"))
+    return out
+
+
+def slim_card(c: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(c, dict):
+        return c
+    out: Dict[str, Any] = {
+        "id": c.get("id"),
+        "title": c.get("title"),
+        "completed": c.get("completed"),
+        "due_on": c.get("due_on"),
+        "app_url": c.get("app_url"),
+    }
+    if c.get("assignees"):
+        out["assignees"] = _person_briefs(c.get("assignees"))
+    if c.get("steps_count"):
+        out["steps_count"] = c.get("steps_count")
+    return out
+
+
+def slim_column(c: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(c, dict):
+        return c
+    return {
+        "id": c.get("id"),
+        "title": c.get("title"),
+        "color": c.get("color"),
+        "cards_count": c.get("cards_count"),
+        "on_hold": c.get("on_hold"),
+        "app_url": c.get("app_url"),
+    }
+
+
+def slim_card_table(t: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(t, dict):
+        return t
+    return {
+        "id": t.get("id"),
+        "title": t.get("title"),
+        "app_url": t.get("app_url"),
+    }
+
+
+def slim_message_board(b: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(b, dict):
+        return b
+    return {
+        "id": b.get("id"),
+        "title": b.get("title"),
+        "messages_count": b.get("messages_count"),
+        "app_url": b.get("app_url"),
+    }
+
+
+def slim_forward(f: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(f, dict):
+        return f
+    out: Dict[str, Any] = {
+        "id": f.get("id"),
+        "subject": f.get("subject"),
+        "from": f.get("from"),
+        "created_at": f.get("created_at"),
+        "app_url": f.get("app_url"),
+    }
+    if f.get("comments_count"):
+        out["comments_count"] = f.get("comments_count")
+    return out
+
+
+def slim_comment(c: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(c, dict):
+        return c
+    out: Dict[str, Any] = {
+        "id": c.get("id"),
+        "created_at": c.get("created_at"),
+        "content": c.get("content"),
+        "app_url": c.get("app_url"),
+    }
+    if c.get("creator"):
+        out["creator"] = _person_brief(c.get("creator"))
+    return out
+
+
+def slim_campfire_line(l: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(l, dict):
+        return l
+    out: Dict[str, Any] = {
+        "id": l.get("id"),
+        "created_at": l.get("created_at"),
+        "content": l.get("content"),
+    }
+    if l.get("creator"):
+        out["creator"] = _person_brief(l.get("creator"))
+    return out
+
+
+def _maybe_slim(items: Any, fn, verbose: bool) -> Any:
+    """Apply slimmer to a value (list or dict) unless verbose=True."""
+    if verbose:
+        return items
+    if isinstance(items, list):
+        return [fn(x) if isinstance(x, dict) else x for x in items]
+    if isinstance(items, dict):
+        return fn(items)
+    return items
+
+
+def _cap(items: Any, limit: int) -> Any:
+    """Cap a list to at most `limit` items. limit<=0 means no cap."""
+    if limit and limit > 0 and isinstance(items, list):
+        return items[:limit]
+    return items
+
+
 # Core MCP Tools - Starting with essential ones from original server
 
 @mcp.tool()
-async def get_projects() -> Dict[str, Any]:
-    """Get all Basecamp projects."""
+async def get_projects(verbose: bool = False, limit: int = 0) -> Dict[str, Any]:
+    """Get all Basecamp projects (compact by default).
+
+    Returns the minimum needed to drive PM/dev workflows: id, name, status,
+    purpose, app_url, plus a flat `tools` map of {dock_name: id} for every
+    enabled feature on the project (todoset, message_board, vault,
+    kanban_board, schedule, questionnaire, inbox, chat). Use those ids in
+    follow-up calls (`get_todolists(project_id, todoset_id)`, etc.).
+
+    Args:
+        verbose: When True, returns the raw Basecamp project payload
+            (description, bookmark_url, full dock objects, color, ...).
+            Default False for fast LLM-friendly responses.
+        limit: Cap the number of projects returned. 0 means no cap.
+    """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         projects = await _run_sync(client.get_projects)
+        projects = _cap(projects, limit)
+        projects = _maybe_slim(projects, slim_project, verbose)
         return {
             "status": "success",
             "projects": projects,
-            "count": len(projects)
+            "count": len(projects) if isinstance(projects, list) else None,
         }
     except Exception as e:
         logger.error(f"Error getting projects: {e}")
@@ -297,21 +633,22 @@ async def get_projects() -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def get_project(project_id: str) -> Dict[str, Any]:
-    """Get details for a specific project.
-    
+async def get_project(project_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """Get details for a specific project (compact by default).
+
     Args:
         project_id: The project ID
+        verbose: When True, returns the raw Basecamp project payload.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         project = await _run_sync(client.get_project, project_id)
         return {
             "status": "success",
-            "project": project
+            "project": _maybe_slim(project, slim_project, verbose),
         }
     except Exception as e:
         logger.error(f"Error getting project {project_id}: {e}")
@@ -372,22 +709,26 @@ async def search_basecamp(query: str, project_id: Optional[str] = None) -> Dict[
         }
 
 @mcp.tool()
-async def get_todolists(project_id: str) -> Dict[str, Any]:
-    """Get todo lists for a project.
-    
+async def get_todolists(project_id: str, verbose: bool = False, limit: int = 0) -> Dict[str, Any]:
+    """Get todo lists for a project (compact by default).
+
     Args:
         project_id: The project ID
+        verbose: When True, returns full Basecamp todolist payloads.
+        limit: Cap the number returned. 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         todolists = await _run_sync(client.get_todolists, project_id)
+        todolists = _cap(todolists, limit)
+        todolists = _maybe_slim(todolists, slim_todolist, verbose)
         return {
             "status": "success",
             "todolists": todolists,
-            "count": len(todolists)
+            "count": len(todolists) if isinstance(todolists, list) else None,
         }
     except Exception as e:
         logger.error(f"Error getting todolists: {e}")
@@ -402,23 +743,33 @@ async def get_todolists(project_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def get_todos(project_id: str, todolist_id: str) -> Dict[str, Any]:
-    """Get todos from a todo list.
-    
+async def get_todos(project_id: str, todolist_id: str, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
+    """Get todos from a todo list (compact by default).
+
+    Note: the underlying Basecamp client auto-paginates through every page;
+    `limit` truncates the response so the LLM doesn't drown in 100s of items.
+
     Args:
         project_id: Project ID
         todolist_id: The todo list ID
+        verbose: When True, returns full Basecamp todo payloads.
+        limit: Cap the number returned (default 50). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         todos = await _run_sync(client.get_todos, project_id, todolist_id)
+        total = len(todos) if isinstance(todos, list) else None
+        todos = _cap(todos, limit)
+        todos = _maybe_slim(todos, slim_todo, verbose)
         return {
             "status": "success",
             "todos": todos,
-            "count": len(todos)
+            "count": len(todos) if isinstance(todos, list) else None,
+            "total": total,
+            "truncated": bool(total and limit and total > limit),
         }
     except Exception as e:
         logger.error(f"Error getting todos: {e}")
@@ -433,12 +784,13 @@ async def get_todos(project_id: str, todolist_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def get_todo(project_id: str, todo_id: str) -> Dict[str, Any]:
-    """Get a single todo item by its ID.
+async def get_todo(project_id: str, todo_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """Get a single todo item by its ID (compact by default).
 
     Args:
         project_id: Project ID
         todo_id: The todo ID
+        verbose: When True, returns the full Basecamp todo payload.
     """
     client = _get_basecamp_client()
     if not client:
@@ -448,7 +800,7 @@ async def get_todo(project_id: str, todo_id: str) -> Dict[str, Any]:
         todo = await _run_sync(client.get_todo, project_id, todo_id)
         return {
             "status": "success",
-            "todo": todo
+            "todo": _maybe_slim(todo, slim_todo, verbose),
         }
     except Exception as e:
         logger.error(f"Error getting todo {todo_id}: {e}")
@@ -799,14 +1151,17 @@ async def global_search(query: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def get_comments(recording_id: str, project_id: str, page: int = 1) -> Dict[str, Any]:
+async def get_comments(recording_id: str, project_id: str, page: int = 1, verbose: bool = False) -> Dict[str, Any]:
     """Get comments/replies on a Basecamp to-do, message, document, or other recording.
+
+    Compact by default (id, creator name+id, created_at, content, app_url).
 
     Args:
         recording_id: The ID of the to-do, message, document, or other item to get comments for
         project_id: The project ID (also called bucket ID)
         page: Page number for pagination (default: 1). Basecamp uses geared pagination:
               page 1 has 15 results, page 2 has 30, page 3 has 50, page 4+ has 100.
+        verbose: When True, returns the full Basecamp comment payloads.
     """
     client = _get_basecamp_client()
     if not client:
@@ -814,13 +1169,15 @@ async def get_comments(recording_id: str, project_id: str, page: int = 1) -> Dic
 
     try:
         result = await _run_sync(client.get_comments, project_id, recording_id, page)
+        comments = result["comments"]
+        comments = _maybe_slim(comments, slim_comment, verbose)
         return {
             "status": "success",
-            "comments": result["comments"],
-            "count": len(result["comments"]),
+            "comments": comments,
+            "count": len(comments) if isinstance(comments, list) else None,
             "page": page,
             "total_count": result["total_count"],
-            "next_page": result["next_page"]
+            "next_page": result["next_page"],
         }
     except Exception as e:
         logger.error(f"Error getting comments: {e}")
@@ -931,23 +1288,30 @@ async def attach_url(project_id: str, recording_id: str, url: str, link_title: s
         }
 
 @mcp.tool()
-async def get_campfire_lines(project_id: str, campfire_id: str) -> Dict[str, Any]:
-    """Get recent messages from a Basecamp campfire (chat room).
-    
+async def get_campfire_lines(project_id: str, campfire_id: str, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
+    """Get recent messages from a Basecamp campfire (chat room) — compact by default.
+
     Args:
         project_id: The project ID
         campfire_id: The campfire/chat room ID
+        verbose: When True, returns full Basecamp campfire-line payloads.
+        limit: Cap the number returned (default 50). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         lines = await _run_sync(client.get_campfire_lines, project_id, campfire_id)
+        total = len(lines) if isinstance(lines, list) else None
+        lines = _cap(lines, limit)
+        lines = _maybe_slim(lines, slim_campfire_line, verbose)
         return {
             "status": "success",
             "campfire_lines": lines,
-            "count": len(lines)
+            "count": len(lines) if isinstance(lines, list) else None,
+            "total": total,
+            "truncated": bool(total and limit and total > limit),
         }
     except Exception as e:
         logger.error(f"Error getting campfire lines: {e}")
@@ -962,11 +1326,12 @@ async def get_campfire_lines(project_id: str, campfire_id: str) -> Dict[str, Any
         }
 
 @mcp.tool()
-async def get_message_board(project_id: str) -> Dict[str, Any]:
-    """Get the message board for a project.
+async def get_message_board(project_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """Get the message board for a project (compact by default).
 
     Args:
         project_id: The project ID
+        verbose: When True, returns the full Basecamp message-board payload.
     """
     client = _get_basecamp_client()
     if not client:
@@ -976,7 +1341,7 @@ async def get_message_board(project_id: str) -> Dict[str, Any]:
         message_board = await _run_sync(client.get_message_board, project_id)
         return {
             "status": "success",
-            "message_board": message_board
+            "message_board": _maybe_slim(message_board, slim_message_board, verbose),
         }
     except Exception as e:
         logger.error(f"Error getting message board: {e}")
@@ -991,12 +1356,17 @@ async def get_message_board(project_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def get_messages(project_id: str, message_board_id: Optional[str] = None) -> Dict[str, Any]:
-    """Get all messages from a project's message board.
+async def get_messages(project_id: str, message_board_id: Optional[str] = None, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
+    """Get all messages from a project's message board (compact list, no content body).
+
+    Returns id, subject, creator, timestamps, comments_count, app_url per
+    message — call get_message(message_id) to fetch the full content.
 
     Args:
         project_id: The project ID
         message_board_id: Optional message board ID. If not provided, will be auto-discovered from the project.
+        verbose: When True, returns full Basecamp message payloads (large).
+        limit: Cap the number returned (default 50). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
@@ -1004,10 +1374,15 @@ async def get_messages(project_id: str, message_board_id: Optional[str] = None) 
 
     try:
         messages = await _run_sync(client.get_messages, project_id, message_board_id)
+        total = len(messages) if isinstance(messages, list) else None
+        messages = _cap(messages, limit)
+        messages = _maybe_slim(messages, slim_message_list, verbose)
         return {
             "status": "success",
             "messages": messages,
-            "count": len(messages)
+            "count": len(messages) if isinstance(messages, list) else None,
+            "total": total,
+            "truncated": bool(total and limit and total > limit),
         }
     except Exception as e:
         logger.error(f"Error getting messages: {e}")
@@ -1022,12 +1397,13 @@ async def get_messages(project_id: str, message_board_id: Optional[str] = None) 
         }
 
 @mcp.tool()
-async def get_message(project_id: str, message_id: str) -> Dict[str, Any]:
-    """Get a specific message by ID.
+async def get_message(project_id: str, message_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """Get a specific message by ID (compact by default, includes content body).
 
     Args:
         project_id: The project ID
         message_id: The message ID
+        verbose: When True, returns the full Basecamp message payload.
     """
     client = _get_basecamp_client()
     if not client:
@@ -1037,7 +1413,7 @@ async def get_message(project_id: str, message_id: str) -> Dict[str, Any]:
         message = await _run_sync(client.get_message, project_id, message_id)
         return {
             "status": "success",
-            "message": message
+            "message": _maybe_slim(message, slim_message, verbose),
         }
     except Exception as e:
         logger.error(f"Error getting message: {e}")
@@ -1174,12 +1550,14 @@ async def get_inbox(project_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def get_forwards(project_id: str, inbox_id: Optional[str] = None) -> Dict[str, Any]:
-    """Get all forwarded emails from a project's inbox.
+async def get_forwards(project_id: str, inbox_id: Optional[str] = None, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
+    """Get all forwarded emails from a project's inbox (compact by default).
 
     Args:
         project_id: The project ID
         inbox_id: Optional inbox ID. If not provided, will be auto-discovered from the project.
+        verbose: When True, returns full Basecamp forward payloads.
+        limit: Cap the number returned (default 50). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
@@ -1187,10 +1565,15 @@ async def get_forwards(project_id: str, inbox_id: Optional[str] = None) -> Dict[
 
     try:
         forwards = await _run_sync(client.get_forwards, project_id, inbox_id)
+        total = len(forwards) if isinstance(forwards, list) else None
+        forwards = _cap(forwards, limit)
+        forwards = _maybe_slim(forwards, slim_forward, verbose)
         return {
             "status": "success",
             "forwards": forwards,
-            "count": len(forwards)
+            "count": len(forwards) if isinstance(forwards, list) else None,
+            "total": total,
+            "truncated": bool(total and limit and total > limit),
         }
     except Exception as e:
         logger.error(f"Error getting forwards: {e}")
@@ -1334,22 +1717,24 @@ async def trash_forward(project_id: str, forward_id: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def get_card_tables(project_id: str) -> Dict[str, Any]:
-    """Get all card tables for a project.
-    
+async def get_card_tables(project_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """Get all card tables for a project (compact by default).
+
     Args:
         project_id: The project ID
+        verbose: When True, returns full Basecamp card-table payloads.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         card_tables = await _run_sync(client.get_card_tables, project_id)
+        card_tables = _maybe_slim(card_tables, slim_card_table, verbose)
         return {
             "status": "success",
             "card_tables": card_tables,
-            "count": len(card_tables)
+            "count": len(card_tables) if isinstance(card_tables, list) else None,
         }
     except Exception as e:
         logger.error(f"Error getting card tables: {e}")
@@ -1396,23 +1781,25 @@ async def get_card_table(project_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def get_columns(project_id: str, card_table_id: str) -> Dict[str, Any]:
-    """Get all columns in a card table.
-    
+async def get_columns(project_id: str, card_table_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """Get all columns in a card table (compact by default).
+
     Args:
         project_id: The project ID
         card_table_id: The card table ID
+        verbose: When True, returns full Basecamp column payloads.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         columns = await _run_sync(client.get_columns, project_id, card_table_id)
+        columns = _maybe_slim(columns, slim_column, verbose)
         return {
             "status": "success",
             "columns": columns,
-            "count": len(columns)
+            "count": len(columns) if isinstance(columns, list) else None,
         }
     except Exception as e:
         logger.error(f"Error getting columns: {e}")
@@ -1427,23 +1814,30 @@ async def get_columns(project_id: str, card_table_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def get_cards(project_id: str, column_id: str) -> Dict[str, Any]:
-    """Get all cards in a column.
-    
+async def get_cards(project_id: str, column_id: str, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
+    """Get all cards in a column (compact by default).
+
     Args:
         project_id: The project ID
         column_id: The column ID
+        verbose: When True, returns full Basecamp card payloads.
+        limit: Cap the number returned (default 50). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         cards = await _run_sync(client.get_cards, project_id, column_id)
+        total = len(cards) if isinstance(cards, list) else None
+        cards = _cap(cards, limit)
+        cards = _maybe_slim(cards, slim_card, verbose)
         return {
             "status": "success",
             "cards": cards,
-            "count": len(cards)
+            "count": len(cards) if isinstance(cards, list) else None,
+            "total": total,
+            "truncated": bool(total and limit and total > limit),
         }
     except Exception as e:
         logger.error(f"Error getting cards: {e}")
@@ -2462,23 +2856,33 @@ async def delete_webhook(project_id: str, webhook_id: str) -> Dict[str, Any]:
 
 # Document Management
 @mcp.tool()
-async def get_documents(project_id: str, vault_id: str) -> Dict[str, Any]:
-    """List documents in a vault.
-    
+async def get_documents(project_id: str, vault_id: str, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
+    """List documents in a vault (compact list, no content body).
+
+    Returns id, title, status, creator, timestamps, app_url. Call get_document
+    to fetch the full HTML content of a single doc.
+
     Args:
         project_id: Project ID
         vault_id: Vault ID
+        verbose: When True, returns full Basecamp document payloads (large).
+        limit: Cap the number returned (default 50). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         docs = await _run_sync(client.get_documents, project_id, vault_id)
+        total = len(docs) if isinstance(docs, list) else None
+        docs = _cap(docs, limit)
+        docs = _maybe_slim(docs, slim_document_list, verbose)
         return {
             "status": "success",
             "documents": docs,
-            "count": len(docs)
+            "count": len(docs) if isinstance(docs, list) else None,
+            "total": total,
+            "truncated": bool(total and limit and total > limit),
         }
     except Exception as e:
         logger.error(f"Error getting documents: {e}")
@@ -2694,8 +3098,8 @@ async def move_document(project_id: str, document_id: str, target_vault_id: str)
 
 # Vault Management (document folders)
 @mcp.tool()
-async def get_vaults(project_id: str, vault_id: str) -> Dict[str, Any]:
-    """List child vaults (subfolders) inside a vault in a Basecamp project.
+async def get_vaults(project_id: str, vault_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """List child vaults (subfolders) inside a vault in a Basecamp project (compact by default).
 
     Use this to navigate the document folder structure. To find the top-level
     vault for a project's Docs & Files section, call get_project first and
@@ -2704,6 +3108,7 @@ async def get_vaults(project_id: str, vault_id: str) -> Dict[str, Any]:
     Args:
         project_id: The project ID
         vault_id: The parent vault ID whose children to list
+        verbose: When True, returns full Basecamp vault payloads.
     """
     client = _get_basecamp_client()
     if not client:
@@ -2711,10 +3116,11 @@ async def get_vaults(project_id: str, vault_id: str) -> Dict[str, Any]:
 
     try:
         vaults = await _run_sync(client.get_vaults, project_id, vault_id)
+        vaults = _maybe_slim(vaults, slim_vault, verbose)
         return {
             "status": "success",
             "vaults": vaults,
-            "count": len(vaults)
+            "count": len(vaults) if isinstance(vaults, list) else None,
         }
     except Exception as e:
         logger.error(f"Error getting vaults: {e}")
@@ -2825,23 +3231,30 @@ async def update_vault(project_id: str, vault_id: str, title: str) -> Dict[str, 
 
 # Upload Management
 @mcp.tool()
-async def get_uploads(project_id: str, vault_id: Optional[str] = None) -> Dict[str, Any]:
-    """List uploads in a project or vault.
-    
+async def get_uploads(project_id: str, vault_id: Optional[str] = None, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
+    """List uploads in a project or vault (compact by default).
+
     Args:
         project_id: Project ID
         vault_id: Optional vault ID to limit to specific vault
+        verbose: When True, returns full Basecamp upload payloads.
+        limit: Cap the number returned (default 50). 0 means no cap.
     """
     client = _get_basecamp_client()
     if not client:
         return _get_auth_error_response()
-    
+
     try:
         uploads = await _run_sync(client.get_uploads, project_id, vault_id)
+        total = len(uploads) if isinstance(uploads, list) else None
+        uploads = _cap(uploads, limit)
+        uploads = _maybe_slim(uploads, slim_upload, verbose)
         return {
             "status": "success",
             "uploads": uploads,
-            "count": len(uploads)
+            "count": len(uploads) if isinstance(uploads, list) else None,
+            "total": total,
+            "truncated": bool(total and limit and total > limit),
         }
     except Exception as e:
         logger.error(f"Error getting uploads: {e}")
@@ -2886,12 +3299,13 @@ async def get_upload(project_id: str, upload_id: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-async def get_todolist(project_id: str, todolist_id: str) -> Dict[str, Any]:
-    """Get a specific todo list by ID.
+async def get_todolist(project_id: str, todolist_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """Get a specific todo list by ID (compact by default).
 
     Args:
         project_id: The project ID
         todolist_id: The todo list ID
+        verbose: When True, returns the full Basecamp todolist payload.
     """
     client = _get_basecamp_client()
     if not client:
@@ -2899,7 +3313,7 @@ async def get_todolist(project_id: str, todolist_id: str) -> Dict[str, Any]:
 
     try:
         todolist = await _run_sync(client.get_todolist, project_id, todolist_id)
-        return {"status": "success", "todolist": todolist}
+        return {"status": "success", "todolist": _maybe_slim(todolist, slim_todolist, verbose)}
     except Exception as e:
         logger.error(f"Error getting todolist {todolist_id}: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
@@ -3085,11 +3499,15 @@ async def reposition_todolist_group(
 # People Management
 
 @mcp.tool()
-async def get_people() -> Dict[str, Any]:
-    """Get all people in the Basecamp account.
+async def get_people(verbose: bool = False) -> Dict[str, Any]:
+    """Get all people in the Basecamp account (compact by default).
 
-    Returns a list of all people with their IDs, names, and email addresses.
-    Use this to look up person IDs needed for assigning todos, cards, etc.
+    Returns id, name, email per person — enough to look up person IDs for
+    assigning todos, cards, comments, etc. Use verbose=True for the full
+    Basecamp payload (avatar URLs, time_zone, employee, owner, ...).
+
+    Args:
+        verbose: When True, returns full Basecamp person payloads.
     """
     client = _get_basecamp_client()
     if not client:
@@ -3097,7 +3515,9 @@ async def get_people() -> Dict[str, Any]:
 
     try:
         people = await _run_sync(client.get_people)
-        return {"status": "success", "count": len(people), "data": people}
+        if not verbose:
+            people = _person_briefs(people)
+        return {"status": "success", "count": len(people) if isinstance(people, list) else None, "data": people}
     except Exception as e:
         logger.error(f"Error getting people: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
@@ -3106,14 +3526,15 @@ async def get_people() -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def get_project_people(project_id: str) -> Dict[str, Any]:
-    """Get all people who have access to a specific project.
+async def get_project_people(project_id: str, verbose: bool = False) -> Dict[str, Any]:
+    """Get all people who have access to a specific project (compact by default).
 
     Use this to find who is on a project before assigning todos or cards.
     Returns person IDs, names, and email addresses for everyone on the project.
 
     Args:
         project_id: The project ID to get people for
+        verbose: When True, returns full Basecamp person payloads.
     """
     client = _get_basecamp_client()
     if not client:
@@ -3121,7 +3542,9 @@ async def get_project_people(project_id: str) -> Dict[str, Any]:
 
     try:
         people = await _run_sync(client.get_project_people, project_id)
-        return {"status": "success", "count": len(people), "data": people}
+        if not verbose:
+            people = _person_briefs(people)
+        return {"status": "success", "count": len(people) if isinstance(people, list) else None, "data": people}
     except Exception as e:
         logger.error(f"Error getting project people: {e}")
         if "401" in str(e) and "expired" in str(e).lower():
