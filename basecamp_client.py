@@ -233,21 +233,36 @@ class BasecampClient:
             raise Exception(f"Failed to archive todolist: {response.status_code} - {response.text}")
 
     # To-do methods
-    def get_todos(self, project_id, todolist_id):
+    def get_todos(self, project_id, todolist_id, completed=None, status=None):
         """Get all todos in a todolist, handling pagination.
 
         Basecamp paginates list endpoints (commonly 15 items per page). This
         implementation follows pagination via the `page` query parameter and
         the HTTP `Link` header if present, aggregating all pages before
         returning the combined list.
+
+        Args:
+            project_id (str): Project ID (bucket)
+            todolist_id (str): Todolist ID
+            completed (bool, optional): When True, return only completed
+                todos. Basecamp returns only active (incomplete) todos when
+                this param is absent.
+            status (str, optional): 'archived' or 'trashed' to list
+                archived/trashed todos instead of active ones.
         """
         endpoint = f'buckets/{project_id}/todolists/{todolist_id}/todos.json'
+
+        extra_params = {}
+        if completed:
+            extra_params['completed'] = 'true'
+        if status:
+            extra_params['status'] = status
 
         all_todos = []
         page = 1
 
         while True:
-            response = self.get(endpoint, params={"page": page})
+            response = self.get(endpoint, params={"page": page, **extra_params})
             if response.status_code != 200:
                 raise Exception(f"Failed to get todos: {response.status_code} - {response.text}")
 

@@ -85,7 +85,10 @@ on list views are stripped.
 
 ### Todos & Task Management
 - get_todolists, get_todolist, create_todolist, update_todolist, trash_todolist
-- get_todos, get_todo, create_todo, update_todo, delete_todo
+- get_todos — returns only ACTIVE todos by default; pass completed=true for
+  completed todos (call both ways and merge to get everything), or
+  status='archived'/'trashed' for archived/trashed todos
+- get_todo, create_todo, update_todo, delete_todo
 - complete_todo, uncomplete_todo, archive_todo, reposition_todo
 - get_todolist_groups, create_todolist_group, reposition_todolist_group
 
@@ -743,8 +746,12 @@ async def get_todolists(project_id: str, verbose: bool = False, limit: int = 0) 
         }
 
 @mcp.tool()
-async def get_todos(project_id: str, todolist_id: str, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
+async def get_todos(project_id: str, todolist_id: str, completed: Optional[bool] = None, status: Optional[str] = None, verbose: bool = False, limit: int = 50) -> Dict[str, Any]:
     """Get todos from a todo list (compact by default).
+
+    IMPORTANT: Basecamp returns only ACTIVE (incomplete) todos by default.
+    To get completed tasks, call again with completed=true and combine the
+    two result sets.
 
     Note: the underlying Basecamp client auto-paginates through every page;
     `limit` truncates the response so the LLM doesn't drown in 100s of items.
@@ -752,6 +759,8 @@ async def get_todos(project_id: str, todolist_id: str, verbose: bool = False, li
     Args:
         project_id: Project ID
         todolist_id: The todo list ID
+        completed: Set to true to return ONLY completed todos (omit for active todos)
+        status: Set to 'archived' or 'trashed' to list archived/trashed todos
         verbose: When True, returns full Basecamp todo payloads.
         limit: Cap the number returned (default 50). 0 means no cap.
     """
@@ -760,7 +769,7 @@ async def get_todos(project_id: str, todolist_id: str, verbose: bool = False, li
         return _get_auth_error_response()
 
     try:
-        todos = await _run_sync(client.get_todos, project_id, todolist_id)
+        todos = await _run_sync(client.get_todos, project_id, todolist_id, completed, status)
         total = len(todos) if isinstance(todos, list) else None
         todos = _cap(todos, limit)
         todos = _maybe_slim(todos, slim_todo, verbose)
